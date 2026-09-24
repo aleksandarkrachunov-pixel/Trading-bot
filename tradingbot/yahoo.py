@@ -47,7 +47,9 @@ class YahooData:
                  cache_seconds: float = 5.0):
         self.symbol_map = symbol_map or {}
         self.session = session or requests.Session()
-        self.session.headers.setdefault("User-Agent", "Mozilla/5.0 (tradingbot)")
+        # requests.Session() always sets "python-requests/x.y", which Yahoo rejects with HTTP 429.
+        if self.session.headers.get("User-Agent", "").startswith("python-requests"):
+            self.session.headers["User-Agent"] = "Mozilla/5.0 (tradingbot)"
         self.cache_seconds = cache_seconds
         self._meta_cache: dict[str, tuple[float, dict]] = {}
         self.id = "yahoo"
