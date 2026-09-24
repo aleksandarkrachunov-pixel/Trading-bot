@@ -80,15 +80,7 @@ python -m tradingbot status             # position, PnL, risk state
 python -m tradingbot live --confirm-live
 ```
 
-Run it on an always-on machine (VPS), for example with Docker:
-
-```bash
-docker build -t tradingbot .
-docker run -d --restart unless-stopped --name tradingbot \
-  -v $PWD/config.yaml:/app/config.yaml -v $PWD/.env:/app/.env \
-  -v $PWD/state:/app/state -v $PWD/logs:/app/logs \
-  tradingbot live --confirm-live
-```
+To keep it running around the clock, see [Run it 24/7](#run-it-247).
 
 ## Trading 212 (stocks & ETFs)
 
@@ -184,6 +176,59 @@ Commands (accepted only from your own chat):
 | `/stop` | close the position and shut the bot down (for stocks, at the next market open) |
 | `/scan` | latest stock-scanner ranking (top 5), when the scanner is on |
 | `/help` | list commands |
+
+## Run it 24/7
+
+The bot has to keep running to watch its stop-loss: the stop is checked by the bot, not
+placed as an order at the broker. Run it on a machine that stays on: a small Linux VPS
+(1 CPU / 1 GB RAM is enough), a Raspberry Pi, or a home server.
+
+**Linux (Ubuntu/Debian), one command:**
+
+```bash
+git clone -b claude/jolly-franklin-a9obyc https://github.com/aleksandarkrachunov-pixel/Trading-bot.git
+cd Trading-bot && ./deploy/install.sh
+```
+
+It installs Docker if needed, asks for your Trading 212 key (and optional Telegram token),
+creates `config.yaml` from the Trading 212 example, checks the connection and starts the bot.
+
+**Any machine with Docker (Linux, macOS, Windows with Docker Desktop):**
+
+```bash
+cp .env.example .env                       # fill in T212_API_KEY / T212_API_SECRET
+cp config.trading212.example.yaml config.yaml
+docker compose up -d --build
+```
+
+`docker-compose.yml` restarts the bot after a crash or a reboot, keeps `state/` and `logs/`
+on the host, and caps Docker's log size. The container reports **unhealthy** if the bot stops
+updating its state file for 15 minutes.
+
+| Task | Command |
+|---|---|
+| Watch the log | `docker compose logs -f` |
+| Health / running? | `docker compose ps` |
+| Position and PnL | `docker compose run --rm bot status` |
+| Today's stock ranking | `docker compose run --rm bot scan` |
+| Stop (keeps the position) | `docker compose stop` |
+| Sell and stop | `touch state/STOP` (or `/stop` on Telegram) |
+| Update to the latest code | `git pull && docker compose up -d --build` |
+
+Set up Telegram (see below) on an always-on machine: it is how you hear about trades,
+errors and the kill switch without logging in.
+
+### Moving a running bot to another machine
+
+The open position lives in `state/*.json`. To move the bot without losing track of it:
+
+1. Stop the old bot gracefully (Ctrl-C / `docker compose stop`, **not** `touch state/STOP`,
+   which sells). Best done while the market is closed.
+2. Copy the `state/` folder (plus `config.yaml` and `.env`) to the new machine.
+3. Start the new bot. The log shows `Resumed state ... (position qty=...)`.
+
+Never run two copies against the same account: both would trade it. Without the state file
+the new bot thinks it is flat, can buy another stock, and stops managing the old position.
 
 ## Controlling a running bot
 
