@@ -15,7 +15,7 @@ trading212:
   extended_hours: false
   quantity_decimals: 2   # fractional share precision
   order_timeout: 60
-  adopt_positions: true  # after a lost state file, take over a held scanner stock (and its stop).
+  adopt_positions: true  # at startup, take over held scanner stocks the bot isn't tracking (lost state).
                          # Set false if you also hold stocks by hand in this account.
 
 scanner:

@@ -264,9 +264,16 @@ def test_fresh_start_takes_over_held_positions(tmp_path):
     assert steady.qty == 5.0 and steady.entry_price == 100.0 and steady.entry_time == "2026-09-24T19:32"
     assert 0 < steady.stop < data.price("STEADY_US_EQ")
     assert any("CLIMB_US_EQ" in m for m in notifier)  # told which one it isn't managing
-    # A restart with a state file never adopts again.
+    # A restart doesn't take over again what it already tracks (and both slots are full).
     again = Engine(cfg, create_strategy("sma_crossover"), AdoptBroker(held), data, scanner=sc)
     assert again.resumed and again.adopt_positions() == 0
+    assert {s.symbol for s in again.open_slots} == {"STEADY_US_EQ", "RISING_US_EQ"}
+
+    # A fill the state file missed is picked up when a slot is free.
+    cfg.scanner.max_positions = 3
+    third = Engine(cfg, create_strategy("sma_crossover"), AdoptBroker(held), data, scanner=sc)
+    assert third.adopt_positions() == 1
+    assert {s.symbol for s in third.open_slots} == {"STEADY_US_EQ", "RISING_US_EQ", "CLIMB_US_EQ"}
 
 
 def test_paper_and_trading212_siblings_share_the_account():
@@ -275,3 +282,18 @@ def test_paper_and_trading212_siblings_share_the_account():
     b.set_price(10.0)
     b.market_buy(5)
     assert a.cash == b.cash < 1000.0 and a.position == 0 and b.position == 5
+
+
+def test_one_failing_stock_does_not_block_others_or_the_save(tmp_path):
+    engine, _ = make_engine(tmp_path, MORE, max_positions=3)
+    original = engine._process_slot
+
+    def flaky(slot, now):
+        if slot is engine.slots[1]:
+            raise RuntimeError("order rejected")
+        original(slot, now)
+    engine._process_slot = flaky
+    engine.step()
+    assert engine.slots[0].is_open and engine.slots[2].is_open and not engine.slots[1].is_open
+    state = json.loads(engine.state_file.read_text())
+    assert sum(s["trader"]["position"]["qty"] > 0 for s in state["slots"]) == 2

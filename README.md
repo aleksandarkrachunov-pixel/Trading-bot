@@ -224,9 +224,10 @@ errors and the kill switch without logging in.
 
 ### Lost state file? The bot takes over what the account holds
 
-With `trading212.adopt_positions: true` (on in the Trading 212 example config), a bot that
-starts **without** a state file takes over the stocks the account already holds, as long as
-they're in the scanner universe (or are `exchange.symbol`), up to `max_positions`. It uses
+With `trading212.adopt_positions: true` (on in the Trading 212 example config), the bot checks
+at startup for stocks the account holds that it isn't tracking (lost state file, or a crash
+right after a fill) and takes them over, as long as they're in the scanner universe (or are
+`exchange.symbol`) and a position slot is free. It uses
 Trading 212's average price as the entry and rebuilds the stop from ATR, then tells you on
 Telegram. Turn it off if you also hold stocks by hand in that account: the bot would manage,
 and eventually sell, the ones it takes over.

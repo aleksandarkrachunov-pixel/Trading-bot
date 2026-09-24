@@ -197,23 +197,26 @@ class Engine:
                     pos.qty = held
 
     def adopt_positions(self) -> int:
-        """Fresh start only: take over positions the account already holds.
+        """At startup, take over held stocks from the universe that no slot tracks.
 
-        Recovers from a lost state file (new machine, wiped disk): without this the bot
-        thinks it is flat, may buy more stocks and leaves the held ones without a stop.
+        Recovers from a lost or stale state file (new machine, wiped disk, a crash right
+        after a fill): without this the bot thinks it is flat, may buy more stocks and
+        leaves the held ones without a stop. Fills free slots only, largest position first.
         Each stop is rebuilt from ATR: from the entry price, or from the current price if
         that is higher and the trailing stop is on (the old stop would have trailed up).
         Returns the number of positions taken over.
         """
         held_positions = getattr(self.broker, "held_positions", None)
-        if self.resumed or self.open_slots or held_positions is None:
+        if held_positions is None:
             return 0
         allowed = set(self.scanner.universe) if self.scanner else {self.symbol}
-        candidates = sorted((p for p in held_positions() if p["ticker"] in allowed),
+        tracked = {s.symbol for s in self.open_slots}
+        candidates = sorted((p for p in held_positions() if p["ticker"] in allowed and p["ticker"] not in tracked),
                             key=lambda p: p["qty"] * p["avg_price"], reverse=True)
-        taken, others = candidates[:len(self.slots)], [p["ticker"] for p in candidates[len(self.slots):]]
+        free = [s for s in self.slots if not s.is_open]
+        taken, others = candidates[:len(free)], [p["ticker"] for p in candidates[len(free):]]
         tf = self.cfg.exchange.timeframe
-        for slot, p in zip(self.slots, taken):
+        for slot, p in zip(free, taken):
             self._assign(slot, p["ticker"])
             candles = drop_open_candle(fetch_ohlcv(self.market_data, slot.symbol, tf,
                                                    self.cfg.engine.history_bars + 1), tf)
@@ -226,7 +229,7 @@ class Engine:
             pos.qty, pos.entry_price, pos.stop = p["qty"], p["avg_price"], stop
             pos.entry_time = p["opened"] or str(datetime.now(timezone.utc))
             pos.take_profit = self.risk.take_profit(p["avg_price"], atr_value)
-            msg = (f"♻️ No saved state: took over the {p['qty']:.6g} {slot.symbol} held in the account "
+            msg = (f"♻️ Took over the untracked {p['qty']:.6g} {slot.symbol} held in the account "
                    f"(avg {p['avg_price']:.4f}, now {price:.4f}), stop {stop:.4f}")
             log.warning(msg)
             self.notifier.send(msg)
@@ -376,19 +379,30 @@ class Engine:
             for slot in self.open_slots:
                 slot.trader.exit(slot.last_price, now, "kill_switch")
 
-        for slot in self.open_slots:
-            p = slot.last_price
-            slot.trader.check_exits(p, p, p, now)
+        try:
+            for slot in self.open_slots:
+                p = slot.last_price
+                self._guarded(slot, slot.trader.check_exits, p, p, p, now)
 
-        if (self.scanner and not self.risk.state.halted and len(self.open_slots) < len(self.slots)
-                and self.scanner.due()):
-            self._rescan()
+            if (self.scanner and not self.risk.state.halted and len(self.open_slots) < len(self.slots)
+                    and self.scanner.due()):
+                self._rescan()
 
-        for slot in self.slots:
-            if slot.active and slot.broker is not None:
-                self._process_slot(slot, now)
+            for slot in self.slots:
+                if slot.active and slot.broker is not None:
+                    self._guarded(slot, self._process_slot, slot, now)
+        finally:
+            self.save_state()  # always record fills, even if a later stock failed
 
-        self.save_state()
+    def _guarded(self, slot: Slot, fn, *args) -> None:
+        """Run one stock's work; a failure there must not stop the other positions."""
+        try:
+            fn(*args)
+        except Exception as e:
+            log.exception("Error on %s", slot.symbol)
+            if self.cfg.telegram.notify_errors:
+                self.notifier.send(f"⚠️ {slot.symbol}: {type(e).__name__}: {e}",
+                                   key=f"{slot.symbol}{type(e).__name__}", throttle=1800)
 
     def _process_slot(self, slot: Slot, now: datetime) -> None:
         tf = self.cfg.exchange.timeframe
@@ -411,7 +425,7 @@ class Engine:
         max_value = None
         if len(self.slots) > 1:  # share the account: cap each position and leave cash for fees/FX
             max_value = min(self.last_equity * self.cfg.risk.max_position_pct / len(self.slots),
-                            self._cash() * 0.98)
+                            self._cash() * 0.95)
         slot.trader.rebalance(target, atr_value, price, now, equity=self.last_equity, max_value=max_value)
         slot.last_bar = bar_time
 

@@ -243,7 +243,17 @@ class Trading212Broker(Broker):
         return math.floor(qty * f + 1e-9) / f
 
     def market_buy(self, qty: float) -> Fill:
-        return self._execute(self._round_down(qty), "buy")
+        # Trading 212 holds back a buffer on market buys (price moves, FX fee), so a buy near the
+        # free cash can be rejected. A rejected order was never placed: retry a little smaller.
+        for attempt in range(4):
+            try:
+                return self._execute(self._round_down(qty), "buy")
+            except Trading212Error as e:
+                if "insufficient-free" not in str(e) or attempt == 3:
+                    raise
+                qty *= 0.95
+                log.warning("Trading 212: insufficient funds, retrying with %.4f %s", qty, self.symbol)
+        raise RuntimeError("unreachable")
 
     def market_sell(self, qty: float) -> Fill:
         qty = self._round_down(min(qty, self.position_qty()))

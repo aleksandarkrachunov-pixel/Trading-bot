@@ -59,7 +59,7 @@ class Trading212Config:
     extended_hours: bool = False
     quantity_decimals: int = 2         # fractional share precision accepted for your instrument
     order_timeout: int = 60            # seconds to wait for a fill before cancelling
-    # On a fresh start (no state file), take over a position already held in the account
+    # At startup, take over positions held in the account that the bot isn't tracking
     # (exchange.symbol, or any scanner stock). Leave off if you also hold stocks by hand.
     adopt_positions: bool = False
 
