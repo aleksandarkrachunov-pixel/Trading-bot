@@ -23,9 +23,30 @@ def setup_logging(log_dir: str | None = None, verbose: bool = False, quiet: bool
     )
 
 
+STOCK_SOURCES = ("trading212", "yahoo")
+
+
 def _public_exchange(cfg: Config):
+    """Market data source: Yahoo Finance for stocks, otherwise the ccxt exchange."""
+    if cfg.exchange.name in STOCK_SOURCES:
+        from .yahoo import YahooData
+        mapping = {cfg.exchange.symbol: cfg.trading212.data_symbol} if cfg.trading212.data_symbol else None
+        return YahooData(mapping)
     from .brokers.ccxt_broker import make_exchange
     return make_exchange(cfg.exchange.name, sandbox=cfg.exchange.sandbox)
+
+
+def _t212_broker(cfg: Config, data):
+    import os
+
+    from .brokers.trading212 import Trading212Broker, Trading212Client
+
+    key, secret = os.environ.get("T212_API_KEY"), os.environ.get("T212_API_SECRET")
+    if not (key and secret):
+        raise SystemExit("Set T212_API_KEY and T212_API_SECRET (see .env.example)")
+    t = cfg.trading212
+    client = Trading212Client(key, secret, t.environment)
+    return Trading212Broker(client, cfg.exchange.symbol, data, t.extended_hours, t.quantity_decimals, t.order_timeout)
 
 
 def cmd_backtest(args, cfg: Config) -> int:
@@ -76,37 +97,131 @@ def cmd_download(args, cfg: Config) -> int:
 
 
 def cmd_run(args, cfg: Config) -> int:
-    from .brokers.ccxt_broker import CcxtBroker, make_exchange
     from .brokers.paper import PaperBroker
     from .engine import Engine
+    from .notify import make_notifier
     from .strategies import create_strategy
 
     cfg.engine.mode = args.command
     strategy = create_strategy(cfg.strategy.name, cfg.strategy.params)
     log = logging.getLogger("tradingbot")
+    data = _public_exchange(cfg)
 
     if args.command == "live":
-        if not args.confirm_live:
+        if cfg.exchange.name == "trading212":
+            real_money = cfg.trading212.environment == "live"
+            label = f"t212-{cfg.trading212.environment}"
+        else:
+            real_money = not cfg.exchange.sandbox
+            label = f"live-{cfg.exchange.name}" + ("" if real_money else "-sandbox")
+        if real_money and not args.confirm_live:
             print("Refusing to trade real money without --confirm-live", file=sys.stderr)
             return 2
-        if not (cfg.api_key and cfg.api_secret):
-            print("Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET (see .env.example)", file=sys.stderr)
+        if cfg.exchange.name == "trading212":
+            broker = _t212_broker(cfg, data)
+        elif cfg.exchange.name == "yahoo":
+            print("Yahoo is a data source only; use 'paper' mode or exchange.name: trading212", file=sys.stderr)
             return 2
-        exchange = make_exchange(cfg.exchange.name, cfg.api_key, cfg.api_secret, cfg.api_password, cfg.exchange.sandbox)
-        broker = CcxtBroker(exchange, cfg.exchange.symbol)
-        log.warning("LIVE TRADING ENABLED on %s%s", exchange.id, " (sandbox)" if cfg.exchange.sandbox else "")
+        else:
+            from .brokers.ccxt_broker import CcxtBroker, make_exchange
+            if not (cfg.api_key and cfg.api_secret):
+                print("Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET (see .env.example)", file=sys.stderr)
+                return 2
+            data = make_exchange(cfg.exchange.name, cfg.api_key, cfg.api_secret, cfg.api_password, cfg.exchange.sandbox)
+            broker = CcxtBroker(data, cfg.exchange.symbol)
+        if real_money:
+            log.warning("LIVE TRADING WITH REAL MONEY on %s", cfg.exchange.name)
+        else:
+            log.warning("Trading on a DEMO/SANDBOX account (%s)", label)
     else:
-        exchange = _public_exchange(cfg)
-        from .brokers.ccxt_broker import with_retries
+        label = f"paper-{cfg.exchange.name}"
+        from .yahoo import YahooData
 
-        def price_source() -> float:
-            return float(with_retries(exchange.fetch_ticker, cfg.exchange.symbol)["last"])
+        if isinstance(data, YahooData):
+            def price_source() -> float:
+                return data.last_price(cfg.exchange.symbol)
+        else:
+            from .brokers.ccxt_broker import with_retries
+
+            def price_source() -> float:
+                return float(with_retries(data.fetch_ticker, cfg.exchange.symbol)["last"])
 
         broker = PaperBroker(cfg.exchange.symbol, cfg.backtest.initial_cash, cfg.backtest.fee_rate,
                              cfg.backtest.slippage, price_source=price_source)
 
-    engine = Engine(cfg, strategy, broker, exchange)
+    notifier = make_notifier(cfg, prefix=f"[{label}] ")
+    engine = Engine(cfg, strategy, broker, data, notifier=notifier, label=label)
     engine.run(max_iterations=args.iterations)
+    return 0
+
+
+def cmd_t212_check(args, cfg: Config) -> int:
+    """Verify Trading 212 credentials, ticker and price feed; optionally round-trip a tiny demo trade."""
+    if cfg.exchange.name != "trading212":
+        print("Set exchange.name: trading212 in your config (see config.trading212.example.yaml)", file=sys.stderr)
+        return 2
+    data = _public_exchange(cfg)
+    broker = _t212_broker(cfg, data)
+    summary = broker.account_summary()
+    symbol = cfg.exchange.symbol
+    print(f"Environment:     {cfg.trading212.environment.upper()}")
+    print(f"Account:         id {summary.get('id')} · currency {broker.account_currency}")
+    print(f"Cash available:  {(summary.get('cash') or {}).get('availableToTrade')} {broker.account_currency}")
+    print(f"Total value:     {summary.get('totalValue')} {broker.account_currency}")
+    print(f"Instrument:      {symbol} · {broker.instrument.get('name')} · {broker.instrument_currency} "
+          f"· type {broker.instrument.get('type')}")
+    print(f"Price feed:      Yahoo '{data.resolve(symbol)}' = {broker.last_price()} {data.currency(symbol)}")
+    fx = broker._fx()
+    print(f"FX:              1 {broker.account_currency} = {fx:.4f} {broker.instrument_currency}")
+    market_open = data.is_market_open(symbol)
+    print(f"Market open:     {market_open}")
+    print(f"Position held:   {broker.position_qty()}")
+    cash, _ = broker.balances()
+    print(f"Buying power:    {cash:,.2f} {broker.instrument_currency}")
+
+    if args.test_trade:
+        if cfg.trading212.environment != "demo":
+            print("--test-trade is only allowed on the demo environment", file=sys.stderr)
+            return 2
+        if not market_open:
+            print("Market is closed; the test order would be queued. Try again during market hours.", file=sys.stderr)
+            return 2
+        print(f"\nTest trade: BUY {args.qty} then SELL it back ...")
+        buy = broker.market_buy(args.qty)
+        print(f"  bought {buy.qty} @ {buy.price} (order {buy.order_id})")
+        sell = broker.market_sell(buy.qty)
+        print(f"  sold   {sell.qty} @ {sell.price} (order {sell.order_id})")
+        print("Demo round trip OK")
+    print("\nTrading 212 connection OK")
+    return 0
+
+
+def cmd_telegram_test(args, cfg: Config) -> int:
+    import os
+
+    from .notify import TelegramNotifier
+
+    token, chat_id = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    if not token:
+        print("Set TELEGRAM_BOT_TOKEN (create a bot with @BotFather)", file=sys.stderr)
+        return 2
+    if not chat_id:
+        n = TelegramNotifier(token, "0")
+        updates = n._call("getUpdates")
+        chats = {str(u["message"]["chat"]["id"]): u["message"]["chat"].get("username") or
+                 u["message"]["chat"].get("title") for u in updates if "message" in u}
+        n.close()
+        if not chats:
+            print("No messages found. Send any message to your bot in Telegram, then run this again.")
+            return 1
+        for cid, name in chats.items():
+            print(f"Found chat: TELEGRAM_CHAT_ID={cid}  ({name})")
+        print("Put the right one in your .env and run telegram-test again.")
+        return 0
+    n = TelegramNotifier(token, chat_id)
+    n.send_now("✅ Trading bot test message: Telegram alerts are working.")
+    n.close()
+    print("Test message sent")
     return 0
 
 
@@ -167,12 +282,18 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--out", required=True)
 
     for name, help_ in (("paper", "Trade live market data with a simulated account"),
-                        ("live", "Trade REAL money on the exchange")):
+                        ("live", "Trade on a real account, or a demo/sandbox account")):
         r = sub.add_parser(name, help=help_)
         r.add_argument("--iterations", type=int, default=None, help="Stop after N loop iterations")
         if name == "live":
-            r.add_argument("--confirm-live", action="store_true", help="Required to place real orders")
+            r.add_argument("--confirm-live", action="store_true",
+                           help="Required for real-money accounts (not for Trading 212 demo / exchange sandbox)")
 
+    t = sub.add_parser("t212-check", help="Check the Trading 212 connection (and optionally place a demo test trade)")
+    t.add_argument("--test-trade", action="store_true", help="Buy and immediately sell --qty shares (demo only)")
+    t.add_argument("--qty", type=float, default=0.1)
+
+    sub.add_parser("telegram-test", help="Send a Telegram test message (or discover your chat id)")
     sub.add_parser("status", help="Show saved bot state")
     sub.add_parser("reset-halt", help="Clear a triggered max-drawdown kill switch")
     return p
@@ -182,11 +303,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config_path = args.config or ("config.yaml" if Path("config.yaml").exists() else None)
     cfg = load_config(config_path)
-    trading = args.command in ("paper", "live")
+    trading = args.command in ("paper", "live", "t212-check")
     # Backtests log every trade at INFO; only show that with -v.
-    setup_logging(cfg.engine.log_dir if trading else None, args.verbose, quiet=not trading)
+    setup_logging(cfg.engine.log_dir if args.command in ("paper", "live") else None, args.verbose, quiet=not trading)
     handlers = {
         "backtest": cmd_backtest, "optimize": cmd_optimize, "download": cmd_download,
         "paper": cmd_run, "live": cmd_run, "status": cmd_status, "reset-halt": cmd_reset_halt,
+        "t212-check": cmd_t212_check, "telegram-test": cmd_telegram_test,
     }
     return handlers[args.command](args, cfg)

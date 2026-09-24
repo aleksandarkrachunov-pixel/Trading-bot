@@ -1,0 +1,43 @@
+# Trading 212 stocks/ETFs. Copy to config.yaml.
+# Test:  python -m tradingbot t212-check --test-trade
+# Run:   python -m tradingbot live              (demo needs no --confirm-live)
+
+exchange:
+  name: trading212
+  symbol: AAPL_US_EQ     # exact Trading 212 ticker (e.g. MSFT_US_EQ, VUSAl_EQ for LSE)
+  timeframe: 1h          # Yahoo intervals: 1m 5m 15m 30m 1h 1d
+
+trading212:
+  environment: demo      # demo = practice money, live = REAL money (needs --confirm-live)
+  data_symbol: ""        # Yahoo symbol for prices; auto: AAPL_US_EQ -> AAPL, VUSAl_EQ -> VUSA.L
+  extended_hours: false
+  quantity_decimals: 2   # fractional share precision
+  order_timeout: 60
+
+strategy:
+  name: sma_crossover
+  params: {fast: 20, slow: 50}
+
+risk:
+  risk_per_trade: 0.01
+  max_position_pct: 0.95
+  stop_atr_multiple: 2.0
+  trailing_stop: true
+  max_drawdown: 0.20
+  daily_loss_limit: 0.05
+  min_order_value: 5.0
+
+backtest:
+  initial_cash: 10000
+  fee_rate: 0.0015       # Trading 212 is commission-free; ~0.15% FX fee when currencies differ
+  slippage: 0.0005
+
+engine:
+  poll_seconds: 60
+  history_bars: 300
+
+telegram:
+  enabled: true          # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env
+  commands: true         # /status and /stop from your chat
+  heartbeat_hours: 24
+  notify_errors: true

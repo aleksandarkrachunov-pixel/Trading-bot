@@ -53,12 +53,31 @@ class EngineConfig:
 
 
 @dataclass
+class Trading212Config:
+    environment: str = "demo"          # demo (practice money) | live (real money)
+    data_symbol: str = ""              # Yahoo Finance symbol for prices; derived from the ticker if empty
+    extended_hours: bool = False
+    quantity_decimals: int = 2         # fractional share precision accepted for your instrument
+    order_timeout: int = 60            # seconds to wait for a fill before cancelling
+
+
+@dataclass
+class TelegramConfig:
+    enabled: bool = False              # needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment
+    commands: bool = True              # accept /status and /stop from your chat
+    heartbeat_hours: float = 24        # periodic status message; 0 disables
+    notify_errors: bool = True
+
+
+@dataclass
 class Config:
     exchange: ExchangeConfig = field(default_factory=ExchangeConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
+    trading212: Trading212Config = field(default_factory=Trading212Config)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
     @property
     def api_key(self) -> str | None:
@@ -107,6 +126,8 @@ def load_config(path: str | Path | None = None) -> Config:
         risk=_build(RiskConfig, raw.get("risk")),
         backtest=_build(BacktestConfig, raw.get("backtest")),
         engine=_build(EngineConfig, raw.get("engine")),
+        trading212=_build(Trading212Config, raw.get("trading212")),
+        telegram=_build(TelegramConfig, raw.get("telegram")),
     )
     validate(cfg)
     return cfg
@@ -124,3 +145,5 @@ def validate(cfg: Config) -> None:
         raise ValueError("risk.stop_atr_multiple must be > 0")
     if cfg.engine.mode not in ("paper", "live"):
         raise ValueError("engine.mode must be 'paper' or 'live'")
+    if cfg.trading212.environment not in ("demo", "live"):
+        raise ValueError("trading212.environment must be 'demo' or 'live'")

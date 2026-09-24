@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 from .brokers.base import Broker, Fill
+from .notify import Notifier
 from .risk import RiskManager
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class Trader:
     risk: RiskManager
     position: PositionState = field(default_factory=PositionState)
     trades: list[Trade] = field(default_factory=list)
+    notifier: Notifier = field(default_factory=Notifier)
 
     def equity(self, price: float) -> float:
         """Equity attributable to the bot: free quote + the position it opened."""
@@ -69,6 +71,7 @@ class Trader:
         ok, reason = self.risk.can_open(equity)
         if not ok:
             log.info("Entry blocked: %s", reason)
+            self.notifier.send(f"⏸ Entry signal ignored: {reason}", key=reason[:20], throttle=6 * 3600)
             return None
         qty = self.risk.position_size(equity, price, atr_value)
         if qty <= 0:
@@ -90,6 +93,11 @@ class Trader:
             fill.qty, fill.price, fill.fee, pos.stop,
             f"{pos.take_profit:.4f}" if pos.take_profit else "-",
         )
+        self.notifier.send(
+            f"🟢 BUY {fill.qty:.6g} {self.broker.symbol} @ {fill.price:.4f}\n"
+            f"Value {fill.qty * fill.price:,.2f} · stop {pos.stop:.4f}"
+            + (f" · target {pos.take_profit:.4f}" if pos.take_profit else "")
+        )
         return fill
 
     def exit(self, price: float, now: datetime, reason: str, fill_price: float | None = None) -> Fill:
@@ -109,6 +117,11 @@ class Trader:
         self.trades.append(trade)
         log.info("SELL %.6f @ %.4f reason=%s pnl=%.2f (%.2f%%)",
                  fill.qty, fill.price, reason, pnl, trade.return_pct * 100)
+        icon = "✅" if pnl > 0 else "🔴"
+        self.notifier.send(
+            f"{icon} SELL {fill.qty:.6g} {self.broker.symbol} @ {fill.price:.4f} ({reason})\n"
+            f"PnL {pnl:+,.2f} ({trade.return_pct:+.2%}) · entry {pos.entry_price:.4f}"
+        )
         self.position = PositionState(wait_for_reset=reason in ("stop_loss", "take_profit"))
         return fill
 

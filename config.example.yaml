@@ -36,3 +36,9 @@ engine:
   history_bars: 300             # candles fetched each loop (must exceed strategy warm-up)
   state_dir: state
   log_dir: logs
+
+telegram:
+  enabled: false                # set TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env
+  commands: true                # /status and /stop from your chat
+  heartbeat_hours: 24           # periodic status message (0 = off)
+  notify_errors: true

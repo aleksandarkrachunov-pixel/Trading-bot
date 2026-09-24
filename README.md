@@ -1,9 +1,10 @@
 # Trading Bot
 
-A fully automated crypto trading bot in Python. It **backtests**, **paper trades** and
-**live trades** on any [ccxt](https://github.com/ccxt/ccxt)-supported exchange (Binance,
-Kraken, Coinbase, Bybit, OKX, …) and uses the same strategy, risk and order logic
-in all three modes, so what you backtest is what runs live.
+A fully automated trading bot in Python. It **backtests**, **paper trades** and
+**live trades** crypto on any [ccxt](https://github.com/ccxt/ccxt)-supported exchange (Binance,
+Kraken, Coinbase, Bybit, OKX, …) and **stocks/ETFs on Trading 212** (demo or live).
+It uses the same strategy, risk and order logic in every mode, so what you backtest is
+what runs live. **Telegram** sends you alerts and lets you control the bot from your phone.
 
 > ⚠️ **Risk warning.** Trading is risky and most automated strategies lose money after fees.
 > The included strategies are examples, not a promise of profit. Backtest, then paper trade
@@ -27,6 +28,8 @@ in all three modes, so what you backtest is what runs live.
   - retries network errors with backoff
   - saves state to disk after each step, so it resumes after a restart or crash
   - graceful shutdown on Ctrl-C / SIGTERM, and a `STOP` file kill switch
+- **Trading 212:** demo (practice) or live account via the official API, with prices and market hours from Yahoo Finance. Includes a connection check and a demo test trade.
+- **Telegram:** alerts for trades, the kill switch, errors and a daily status. Control the bot with `/status` and `/stop`.
 - **Safety defaults:** paper mode by default. Live trading needs API keys *and* the `--confirm-live` flag.
 
 ## Quick start
@@ -86,12 +89,80 @@ docker run -d --restart unless-stopped --name tradingbot \
   tradingbot live --confirm-live
 ```
 
+## Trading 212 (stocks & ETFs)
+
+Trading 212's API works with **Invest** and **Stocks ISA** accounts. Test on the **demo**
+(practice money) account first.
+
+1. In the Trading 212 app, switch to your **Practice** account, then open
+   *Settings → API (Beta) → Generate API key*. Give it these permissions: account,
+   portfolio, orders:read, orders:execute, history:orders and metadata.
+2. Put the key and secret in `.env`:
+   ```
+   T212_API_KEY=...
+   T212_API_SECRET=...
+   ```
+3. Use the Trading 212 config:
+   ```bash
+   cp config.trading212.example.yaml config.yaml   # set exchange.symbol, e.g. AAPL_US_EQ
+   ```
+4. Check the connection, then place a tiny test round trip (buy 0.1 share and sell it back).
+   The test trade needs the market to be open.
+   ```bash
+   python -m tradingbot t212-check
+   python -m tradingbot t212-check --test-trade --qty 0.1
+   ```
+5. Backtest on the same stock, then start the bot on the demo account:
+   ```bash
+   python -m tradingbot backtest --since 2024-10-01     # hourly Yahoo data goes back ~2 years
+   python -m tradingbot live                            # demo: no --confirm-live needed
+   ```
+
+How it works:
+- **Prices:** Trading 212's API has no price data, so candles, last prices, market hours
+  and FX rates come from Yahoo Finance. The Yahoo symbol is derived from the ticker
+  (`AAPL_US_EQ` → `AAPL`, `VUSAl_EQ` → `VUSA.L`). Set `trading212.data_symbol` if the guess is wrong.
+- **Market hours:** the bot only trades while the market is open. Signals from the last bar
+  of the day are acted on at the next open, the same way the backtest assumes.
+- **Orders:** market orders only. The bot waits up to `order_timeout` seconds for a fill,
+  then cancels. It reads the fill price from order history.
+- **Currencies:** if your account currency differs from the stock's (e.g. GBP account, USD
+  stock), cash is converted with a live FX rate. Trading 212 charges a ~0.15% FX fee, so the
+  example config sets `fee_rate: 0.0015` for backtests.
+- **Rate limits:** the bot respects Trading 212's per-endpoint limits. Keep `poll_seconds` ≥ 30.
+- **Going live:** set `trading212.environment: live`, use a key from your real account, and run
+  `python -m tradingbot live --confirm-live`.
+
+## Telegram alerts & remote control
+
+1. In Telegram, message **@BotFather** → `/newbot`, and copy the token into `.env` as `TELEGRAM_BOT_TOKEN`.
+2. Send any message to your new bot, then run `python -m tradingbot telegram-test`. It prints your
+   chat id. Add it to `.env` as `TELEGRAM_CHAT_ID`.
+3. Run `python -m tradingbot telegram-test` again. You should receive a test message.
+4. Set `telegram.enabled: true` in `config.yaml`.
+
+You'll get messages for:
+- bot start and stop
+- every buy and sell, with PnL
+- entries blocked by the daily loss limit
+- the kill switch firing
+- errors (at most one per error type every 30 minutes)
+- a status summary every `heartbeat_hours`
+
+Commands (accepted only from your own chat):
+
+| Command | Effect |
+|---|---|
+| `/status` | equity, price, position, stop, PnL, market open/closed |
+| `/stop` | close the position and shut the bot down (for stocks, at the next market open) |
+| `/help` | list commands |
+
 ## Controlling a running bot
 
 | Action | How |
 |---|---|
 | Stop gracefully (keeps position) | Ctrl-C / `docker stop` |
-| Flatten position and stop | `touch state/STOP`. Delete the file before restarting. |
+| Flatten position and stop | `touch state/STOP` or `/stop` on Telegram. Delete `state/STOP` before restarting. |
 | Inspect | `python -m tradingbot status`, `logs/tradingbot.log` |
 | Resume after the kill switch fired | Review what happened, then `python -m tradingbot reset-halt` |
 
@@ -110,7 +181,9 @@ every poll_seconds:
 | `tradingbot/strategies/` | signal generation (`target_positions(df) -> 0/1 series`) |
 | `tradingbot/risk.py` | sizing, stops, kill switch, daily loss limit |
 | `tradingbot/trader.py` | entry/exit logic shared by backtest and live |
-| `tradingbot/brokers/` | `PaperBroker` (simulated) and `CcxtBroker` (real exchange) |
+| `tradingbot/brokers/` | `PaperBroker` (simulated), `CcxtBroker` (crypto exchanges), `Trading212Broker` |
+| `tradingbot/yahoo.py` | Yahoo Finance candles, prices, market hours, FX (for stocks) |
+| `tradingbot/notify.py` | Telegram alerts and `/status` / `/stop` commands |
 | `tradingbot/backtest.py` | backtester and performance metrics |
 | `tradingbot/engine.py` | live/paper loop with state persistence |
 | `tradingbot/optimize.py` | parameter grid search with train/test split |

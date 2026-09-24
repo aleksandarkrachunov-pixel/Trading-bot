@@ -18,7 +18,8 @@ class Broker(ABC):
 
     def __init__(self, symbol: str):
         self.symbol = symbol
-        self.base, self.quote = symbol.split("/")
+        # "BTC/USDT" -> base BTC, quote USDT. Stock tickers (e.g. AAPL_US_EQ) have no quote part.
+        self.base, _, self.quote = symbol.partition("/")
 
     @abstractmethod
     def balances(self) -> tuple[float, float]:
