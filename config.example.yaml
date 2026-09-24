@@ -1,0 +1,38 @@
+# Copy to config.yaml and adjust. Secrets go in .env, never in this file.
+
+exchange:
+  name: binance          # any ccxt exchange id: binance, kraken, coinbase, bybit, okx, ...
+  symbol: BTC/USDT
+  timeframe: 1h          # candle size the strategy runs on
+  sandbox: false         # true = exchange testnet (if supported) — recommended before going live
+
+strategy:
+  name: sma_crossover    # sma_crossover | rsi_mean_reversion
+  params:
+    fast: 20
+    slow: 50
+    use_ema: false
+  # name: rsi_mean_reversion
+  # params: {rsi_period: 14, oversold: 30, exit_level: 55, trend_period: 200}
+
+risk:
+  risk_per_trade: 0.01          # lose max 1% of equity if the stop is hit
+  max_position_pct: 0.95        # never put more than 95% of equity in one position
+  atr_period: 14
+  stop_atr_multiple: 2.0        # stop-loss = entry - 2 * ATR
+  take_profit_atr_multiple: null  # e.g. 4.0 for a take-profit at entry + 4 * ATR
+  trailing_stop: true
+  max_drawdown: 0.20            # kill switch: flatten + halt at -20% from peak equity
+  daily_loss_limit: 0.05        # no new entries after -5% in a UTC day
+  min_order_value: 10.0
+
+backtest:                       # also used as the starting balance for paper trading
+  initial_cash: 10000
+  fee_rate: 0.001
+  slippage: 0.0005
+
+engine:
+  poll_seconds: 30
+  history_bars: 300             # candles fetched each loop (must exceed strategy warm-up)
+  state_dir: state
+  log_dir: logs

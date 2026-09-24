@@ -1,0 +1,192 @@
+"""Command line interface: python -m tradingbot <command> ..."""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+
+from .config import Config, load_config
+
+
+def setup_logging(log_dir: str | None = None, verbose: bool = False, quiet: bool = False) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    if log_dir:
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(Path(log_dir) / "tradingbot.log"))
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+def _public_exchange(cfg: Config):
+    from .brokers.ccxt_broker import make_exchange
+    return make_exchange(cfg.exchange.name, sandbox=cfg.exchange.sandbox)
+
+
+def cmd_backtest(args, cfg: Config) -> int:
+    from .backtest import format_stats, run_backtest
+    from .data import fetch_history, load_csv, synthetic_ohlcv
+    from .strategies import create_strategy
+
+    if args.csv:
+        df = load_csv(args.csv)
+    elif args.synthetic:
+        df = synthetic_ohlcv(bars=args.synthetic)
+    else:
+        if not args.since:
+            print("Provide --csv FILE, --synthetic N, or --since DATE to download data", file=sys.stderr)
+            return 2
+        df = fetch_history(_public_exchange(cfg), cfg.exchange.symbol, cfg.exchange.timeframe, args.since, args.until)
+
+    strategy = create_strategy(cfg.strategy.name, cfg.strategy.params)
+    result = run_backtest(df, strategy, cfg)
+    print(f"\nBacktest: {strategy!r} on {cfg.exchange.symbol} {cfg.exchange.timeframe} ({len(df)} bars)")
+    print(format_stats(result.stats))
+    if args.trades_out:
+        result.trades_frame().to_csv(args.trades_out, index=False)
+        print(f"\nTrades written to {args.trades_out}")
+    if args.equity_out:
+        result.equity.to_csv(args.equity_out)
+        print(f"Equity curve written to {args.equity_out}")
+    return 0
+
+
+def cmd_optimize(args, cfg: Config) -> int:
+    from .data import load_csv, synthetic_ohlcv
+    from .optimize import grid_search, parse_grid
+
+    df = load_csv(args.csv) if args.csv else synthetic_ohlcv(bars=args.synthetic or 3000)
+    results = grid_search(df, cfg, cfg.strategy.name, parse_grid(args.grid), metric=args.metric, train_frac=args.train_frac)
+    print(results.head(args.top).to_string(index=False))
+    return 0
+
+
+def cmd_download(args, cfg: Config) -> int:
+    from .data import fetch_history, save_csv
+
+    df = fetch_history(_public_exchange(cfg), cfg.exchange.symbol, cfg.exchange.timeframe, args.since, args.until)
+    save_csv(df, args.out)
+    print(f"Saved {len(df)} candles to {args.out}")
+    return 0
+
+
+def cmd_run(args, cfg: Config) -> int:
+    from .brokers.ccxt_broker import CcxtBroker, make_exchange
+    from .brokers.paper import PaperBroker
+    from .engine import Engine
+    from .strategies import create_strategy
+
+    cfg.engine.mode = args.command
+    strategy = create_strategy(cfg.strategy.name, cfg.strategy.params)
+    log = logging.getLogger("tradingbot")
+
+    if args.command == "live":
+        if not args.confirm_live:
+            print("Refusing to trade real money without --confirm-live", file=sys.stderr)
+            return 2
+        if not (cfg.api_key and cfg.api_secret):
+            print("Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET (see .env.example)", file=sys.stderr)
+            return 2
+        exchange = make_exchange(cfg.exchange.name, cfg.api_key, cfg.api_secret, cfg.api_password, cfg.exchange.sandbox)
+        broker = CcxtBroker(exchange, cfg.exchange.symbol)
+        log.warning("LIVE TRADING ENABLED on %s%s", exchange.id, " (sandbox)" if cfg.exchange.sandbox else "")
+    else:
+        exchange = _public_exchange(cfg)
+        from .brokers.ccxt_broker import with_retries
+
+        def price_source() -> float:
+            return float(with_retries(exchange.fetch_ticker, cfg.exchange.symbol)["last"])
+
+        broker = PaperBroker(cfg.exchange.symbol, cfg.backtest.initial_cash, cfg.backtest.fee_rate,
+                             cfg.backtest.slippage, price_source=price_source)
+
+    engine = Engine(cfg, strategy, broker, exchange)
+    engine.run(max_iterations=args.iterations)
+    return 0
+
+
+def cmd_status(args, cfg: Config) -> int:
+    files = sorted(Path(cfg.engine.state_dir).glob("*.json"))
+    if not files:
+        print("No state files found")
+        return 0
+    for f in files:
+        d = json.loads(f.read_text())
+        trades = d["trader"]["trades"]
+        pnl = sum(t["pnl"] for t in trades)
+        print(f"== {f.name} (updated {d.get('updated')})")
+        print(f"   position: {json.dumps(d['trader']['position'])}")
+        print(f"   risk:     {json.dumps(d['risk'])}")
+        print(f"   trades:   {len(trades)}  realised PnL: {pnl:.2f}")
+        if "paper" in d:
+            print(f"   paper:    {json.dumps(d['paper'])}")
+    return 0
+
+
+def cmd_reset_halt(args, cfg: Config) -> int:
+    files = sorted(Path(cfg.engine.state_dir).glob("*.json"))
+    for f in files:
+        d = json.loads(f.read_text())
+        if d["risk"].get("halted"):
+            d["risk"].update(halted=False, halt_reason="", peak_equity=0.0)
+            f.write_text(json.dumps(d, indent=2))
+            print(f"Cleared kill switch in {f.name}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="tradingbot", description="Automated crypto trading bot")
+    p.add_argument("-c", "--config", default=None, help="YAML config file (default: config.yaml if present)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    b = sub.add_parser("backtest", help="Backtest the configured strategy")
+    b.add_argument("--csv", help="OHLCV CSV (timestamp,open,high,low,close,volume)")
+    b.add_argument("--synthetic", type=int, metavar="BARS", help="Use N bars of synthetic data")
+    b.add_argument("--since", help="Download data from this date (e.g. 2023-01-01)")
+    b.add_argument("--until", help="Download data up to this date")
+    b.add_argument("--trades-out", help="Write trades CSV")
+    b.add_argument("--equity-out", help="Write equity curve CSV")
+
+    o = sub.add_parser("optimize", help="Grid-search strategy params with a train/test split")
+    o.add_argument("--csv")
+    o.add_argument("--synthetic", type=int, metavar="BARS")
+    o.add_argument("--grid", required=True, help='e.g. "fast=10,20,30 slow=50,100"')
+    o.add_argument("--metric", default="sharpe")
+    o.add_argument("--train-frac", type=float, default=0.7)
+    o.add_argument("--top", type=int, default=10)
+
+    d = sub.add_parser("download", help="Download historical candles to CSV")
+    d.add_argument("--since", required=True)
+    d.add_argument("--until")
+    d.add_argument("--out", required=True)
+
+    for name, help_ in (("paper", "Trade live market data with a simulated account"),
+                        ("live", "Trade REAL money on the exchange")):
+        r = sub.add_parser(name, help=help_)
+        r.add_argument("--iterations", type=int, default=None, help="Stop after N loop iterations")
+        if name == "live":
+            r.add_argument("--confirm-live", action="store_true", help="Required to place real orders")
+
+    sub.add_parser("status", help="Show saved bot state")
+    sub.add_parser("reset-halt", help="Clear a triggered max-drawdown kill switch")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    config_path = args.config or ("config.yaml" if Path("config.yaml").exists() else None)
+    cfg = load_config(config_path)
+    trading = args.command in ("paper", "live")
+    # Backtests log every trade at INFO; only show that with -v.
+    setup_logging(cfg.engine.log_dir if trading else None, args.verbose, quiet=not trading)
+    handlers = {
+        "backtest": cmd_backtest, "optimize": cmd_optimize, "download": cmd_download,
+        "paper": cmd_run, "live": cmd_run, "status": cmd_status, "reset-halt": cmd_reset_halt,
+    }
+    return handlers[args.command](args, cfg)
