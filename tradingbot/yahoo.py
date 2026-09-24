@@ -27,8 +27,14 @@ MAX_LOOKBACK_DAYS = {"1m": 7, "2m": 59, "5m": 59, "15m": 59, "30m": 59, "60m": 7
 T212_SUFFIXES = {"l": ".L", "d": ".DE", "p": ".PA", "a": ".AS", "m": ".MC", "s": ".SW", "e": ".MI"}
 
 
+# Trading 212 tickers that kept an old symbol after a rename (T212 ticker -> Yahoo symbol).
+KNOWN_RENAMES = {"FB_US_EQ": "META"}
+
+
 def t212_to_yahoo(ticker: str) -> str:
     """AAPL_US_EQ -> AAPL, VUSAl_EQ -> VUSA.L, SAPd_EQ -> SAP.DE."""
+    if ticker in KNOWN_RENAMES:
+        return KNOWN_RENAMES[ticker]
     if "/" in ticker:  # already a pair like BTC/USD
         return ticker.replace("/", "-")
     m = re.fullmatch(r"([A-Z0-9.]+)_US_EQ", ticker)

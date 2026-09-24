@@ -137,20 +137,36 @@ def cmd_run(args, cfg: Config) -> int:
         label = f"paper-{cfg.exchange.name}"
         from .yahoo import YahooData
 
+        # broker.symbol, not the config symbol: the scanner can switch stocks.
         if isinstance(data, YahooData):
             def price_source() -> float:
-                return data.last_price(cfg.exchange.symbol)
+                return data.last_price(broker.symbol)
         else:
             from .brokers.ccxt_broker import with_retries
 
             def price_source() -> float:
-                return float(with_retries(data.fetch_ticker, cfg.exchange.symbol)["last"])
+                return float(with_retries(data.fetch_ticker, broker.symbol)["last"])
 
         broker = PaperBroker(cfg.exchange.symbol, cfg.backtest.initial_cash, cfg.backtest.fee_rate,
                              cfg.backtest.slippage, price_source=price_source)
 
+    scanner = None
+    if cfg.scanner.enabled:
+        if cfg.exchange.name not in STOCK_SOURCES:
+            print("The stock scanner needs exchange.name: trading212 (or yahoo for paper)", file=sys.stderr)
+            return 2
+        from .scanner import DEFAULT_UNIVERSE, Scanner
+        universe = cfg.scanner.universe or DEFAULT_UNIVERSE
+        if hasattr(broker, "tradable"):
+            universe = broker.tradable(universe)
+        if not universe:
+            print("Scanner universe is empty", file=sys.stderr)
+            return 2
+        scanner = Scanner(data, strategy, cfg.scanner, cfg.exchange.timeframe, cfg.engine.history_bars, universe)
+        log.info("Scanner on: picking the best of %d stocks", len(universe))
+
     notifier = make_notifier(cfg, prefix=f"[{label}] ")
-    engine = Engine(cfg, strategy, broker, data, notifier=notifier, label=label)
+    engine = Engine(cfg, strategy, broker, data, notifier=notifier, label=label, scanner=scanner)
     engine.run(max_iterations=args.iterations)
     return 0
 
@@ -193,6 +209,28 @@ def cmd_t212_check(args, cfg: Config) -> int:
         print(f"  sold   {sell.qty} @ {sell.price} (order {sell.order_id})")
         print("Demo round trip OK")
     print("\nTrading 212 connection OK")
+    return 0
+
+
+def cmd_scan(args, cfg: Config) -> int:
+    """Rank the scanner universe right now (no trading)."""
+    from .scanner import DEFAULT_UNIVERSE, Scanner, format_table
+    from .strategies import create_strategy
+    from .yahoo import YahooData
+
+    universe = args.symbols.split(",") if args.symbols else (cfg.scanner.universe or DEFAULT_UNIVERSE)
+    strategy = create_strategy(cfg.strategy.name, cfg.strategy.params)
+    scanner = Scanner(YahooData(), strategy, cfg.scanner, cfg.exchange.timeframe, cfg.engine.history_bars, universe)
+    print(f"Scanning {len(universe)} stocks on {cfg.exchange.timeframe} candles "
+          f"({cfg.scanner.lookback_bars}-bar momentum, {strategy!r}) ...", flush=True)
+    results = scanner.scan()
+    if not results:
+        print("No data for any ticker", file=sys.stderr)
+        return 1
+    print(format_table(results, cfg.scanner.min_price, args.top))
+    best = scanner.best()
+    print(f"\nBest pick: {best.symbol} (score {best.score:+.2f}, {best.momentum:+.1%})" if best
+          else "\nNo stock is eligible right now (none has a buy signal with positive momentum)")
     return 0
 
 
@@ -260,7 +298,7 @@ def cmd_setup(args, cfg: Config) -> int:
 
     if not Path("config.yaml").exists():
         shutil.copy("config.trading212.example.yaml", "config.yaml")
-        print("Created config.yaml (Trading 212 DEMO, AAPL_US_EQ)")
+        print("Created config.yaml (Trading 212 DEMO, stock scanner on)")
     else:
         print("config.yaml already exists, left unchanged")
     print("\nNext: python -m tradingbot t212-check")
@@ -335,6 +373,10 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--test-trade", action="store_true", help="Buy and immediately sell --qty shares (demo only)")
     t.add_argument("--qty", type=float, default=0.1)
 
+    s = sub.add_parser("scan", help="Rank the stock scanner universe and show the best pick (no trading)")
+    s.add_argument("--top", type=int, default=20, help="Rows to show")
+    s.add_argument("--symbols", help="Comma-separated tickers instead of the configured universe")
+
     sub.add_parser("setup", help="First-time setup: enter your API keys, creates .env and config.yaml")
     sub.add_parser("telegram-test", help="Send a Telegram test message (or discover your chat id)")
     sub.add_parser("status", help="Show saved bot state")
@@ -352,6 +394,6 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "backtest": cmd_backtest, "optimize": cmd_optimize, "download": cmd_download,
         "paper": cmd_run, "live": cmd_run, "status": cmd_status, "reset-halt": cmd_reset_halt,
-        "t212-check": cmd_t212_check, "setup": cmd_setup, "telegram-test": cmd_telegram_test,
+        "t212-check": cmd_t212_check, "scan": cmd_scan, "setup": cmd_setup, "telegram-test": cmd_telegram_test,
     }
     return handlers[args.command](args, cfg)

@@ -29,6 +29,7 @@ what runs live. **Telegram** sends you alerts and lets you control the bot from 
   - saves state to disk after each step, so it resumes after a restart or crash
   - graceful shutdown on Ctrl-C / SIGTERM, and a `STOP` file kill switch
 - **Trading 212:** demo (practice) or live account via the official API, with prices and market hours from Yahoo Finance. Includes a connection check and a demo test trade.
+- **Stock scanner:** ranks ~45 large US stocks (or your own list) by risk-adjusted momentum and trades the best one with a buy signal.
 - **Telegram:** alerts for trades, the kill switch, errors and a daily status. Control the bot with `/status` and `/stop`.
 - **Safety defaults:** paper mode by default. Live trading needs API keys *and* the `--confirm-live` flag.
 
@@ -104,7 +105,7 @@ Trading 212's API works with **Invest** and **Stocks ISA** accounts. Test on the
    ```
 3. Use the Trading 212 config:
    ```bash
-   cp config.trading212.example.yaml config.yaml   # set exchange.symbol, e.g. AAPL_US_EQ
+   cp config.trading212.example.yaml config.yaml   # stock scanner on; see below
    ```
 4. Check the connection, then place a tiny test round trip (buy 0.1 share and sell it back).
    The test trade needs the market to be open.
@@ -133,6 +134,32 @@ How it works:
 - **Going live:** set `trading212.environment: live`, use a key from your real account, and run
   `python -m tradingbot live --confirm-live`.
 
+### Stock scanner: trade the best stock, not just one
+
+With `scanner.enabled: true` (the default in `config.trading212.example.yaml`), the bot
+doesn't stick to `exchange.symbol`. It ranks a list of stocks and trades the best one:
+
+- **Score:** risk-adjusted momentum, i.e. the return over `lookback_bars` candles divided by
+  the volatility over the same window. A steady climb beats a choppy one with the same gain.
+- **Eligible:** the strategy must currently say "buy" (e.g. fast MA above slow MA), the score
+  must be positive and the price at least `min_price`.
+- **Rotation:** while flat, the bot rescans every `rescan_minutes` and switches to the top
+  eligible stock. Once it buys, it holds that stock until the stop, the strategy exit or the
+  kill switch closes the position, then scans again. It holds one stock at a time.
+- **Universe:** `scanner.universe` lists Trading 212 tickers. Leave it empty for ~45 large US
+  stocks (Apple, Microsoft, Nvidia, Meta, JPMorgan, Eli Lilly, Exxon, ...). Tickers not on
+  Trading 212, or in a different currency from `exchange.symbol`, are skipped so equity and
+  the drawdown limit stay in one currency. You can write `META_US_EQ`; the bot finds
+  Trading 212's `FB_US_EQ`.
+
+```bash
+python -m tradingbot scan                     # show today's ranking and the pick (no trading)
+python -m tradingbot scan --symbols NVDA_US_EQ,AMD_US_EQ,INTC_US_EQ
+```
+
+On Telegram, `/scan` shows the latest top 5. Backtests still test one stock
+(`exchange.symbol`), so backtest a few of the top picks before trusting the scanner.
+
 ## Telegram alerts & remote control
 
 1. In Telegram, message **@BotFather** → `/newbot`, and copy the token into `.env` as `TELEGRAM_BOT_TOKEN`.
@@ -155,6 +182,7 @@ Commands (accepted only from your own chat):
 |---|---|
 | `/status` | equity, price, position, stop, PnL, market open/closed |
 | `/stop` | close the position and shut the bot down (for stocks, at the next market open) |
+| `/scan` | latest stock-scanner ranking (top 5), when the scanner is on |
 | `/help` | list commands |
 
 ## Controlling a running bot
@@ -183,6 +211,7 @@ every poll_seconds:
 | `tradingbot/trader.py` | entry/exit logic shared by backtest and live |
 | `tradingbot/brokers/` | `PaperBroker` (simulated), `CcxtBroker` (crypto exchanges), `Trading212Broker` |
 | `tradingbot/yahoo.py` | Yahoo Finance candles, prices, market hours, FX (for stocks) |
+| `tradingbot/scanner.py` | ranks a stock universe and picks the best one to trade |
 | `tradingbot/notify.py` | Telegram alerts and `/status` / `/stop` commands |
 | `tradingbot/backtest.py` | backtester and performance metrics |
 | `tradingbot/engine.py` | live/paper loop with state persistence |

@@ -17,6 +17,10 @@ class Broker(ABC):
     """Spot-only, long-only broker interface."""
 
     def __init__(self, symbol: str):
+        Broker.set_symbol(self, symbol)
+
+    def set_symbol(self, symbol: str) -> None:
+        """Switch the traded instrument (only while flat). Used by the stock scanner."""
         self.symbol = symbol
         # "BTC/USDT" -> base BTC, quote USDT. Stock tickers (e.g. AAPL_US_EQ) have no quote part.
         self.base, _, self.quote = symbol.partition("/")

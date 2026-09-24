@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import threading
 import time
 
@@ -127,21 +128,71 @@ class Trading212Broker(Broker):
         self.order_timeout = order_timeout
         self._sleep = sleep
         self._summary: tuple[float, dict] | None = None
+        self._instruments: dict[str, dict] | None = None
 
         summary = self.account_summary()
         self.account_currency = summary.get("currency", "")
-        self.instrument = self._find_instrument(ticker)
-        self.instrument_currency = self.instrument.get("currencyCode") or data.currency(ticker) or self.account_currency
+        self.set_symbol(ticker)
+
+    def set_symbol(self, ticker: str) -> None:
+        instrument = self._find_instrument(ticker)
+        self.map_price_symbol(ticker)
+        super().set_symbol(ticker)
+        self.instrument = instrument
+        self.instrument_currency = (instrument.get("currencyCode") or self.data.currency(ticker)
+                                    or self.account_currency)
         self.quote = self.instrument_currency
         log.info("Trading 212 %s account (%s): %s [%s], instrument currency %s",
-                 client.environment.upper(), self.account_currency, ticker,
-                 self.instrument.get("name", "?"), self.instrument_currency)
+                 self.client.environment.upper(), self.account_currency, ticker,
+                 instrument.get("name", "?"), self.instrument_currency)
+
+    def instruments(self) -> dict[str, dict]:
+        """All tradable instruments by ticker (fetched once: the endpoint allows 1 call / 50s)."""
+        if self._instruments is None:
+            self._instruments = {i["ticker"]: i for i in self.client.instruments() if i.get("ticker")}
+        return self._instruments
 
     def _find_instrument(self, ticker: str) -> dict:
-        for inst in self.client.instruments():
-            if inst.get("ticker") == ticker:
-                return inst
-        raise ValueError(f"Ticker '{ticker}' not found on Trading 212. Use the exact ticker, e.g. AAPL_US_EQ")
+        inst = self.instruments().get(ticker)
+        if inst is None:
+            raise ValueError(f"Ticker '{ticker}' not found on Trading 212. Use the exact ticker, e.g. AAPL_US_EQ")
+        return inst
+
+    def tradable(self, tickers: list[str]) -> list[str]:
+        """The subset of `tickers` on Trading 212 in the current instrument's currency.
+
+        Keeping one currency means equity, the drawdown kill switch and position sizing
+        stay comparable when the scanner switches between stocks.
+        """
+        insts = self.instruments()
+        by_symbol = {i.get("shortName"): t for t, i in insts.items() if t.endswith("_US_EQ")}
+        keep, dropped = [], []
+        for t in tickers:
+            if t not in insts:  # e.g. META_US_EQ -> FB_US_EQ (T212 kept the old ticker)
+                t = by_symbol.get(t.removesuffix("_US_EQ"), t)
+            inst = insts.get(t)
+            ok = inst is not None and (inst.get("currencyCode") or self.instrument_currency) == self.instrument_currency
+            if ok and t not in keep:
+                keep.append(t)
+                self.map_price_symbol(t)
+            elif not ok:
+                dropped.append(t)
+        if dropped:
+            log.warning("Scanner: not on Trading 212 or not in %s, skipped: %s",
+                        self.instrument_currency, ", ".join(dropped))
+        return keep
+
+    def map_price_symbol(self, ticker: str) -> None:
+        """Price US stocks by their market symbol (T212 `shortName`), not the T212 ticker.
+
+        The ticker can be stale after a rename: FB_US_EQ is Meta (META), and CTRA_US_EQ
+        is Alpha Metallurgical (AMR), not Coterra.
+        """
+        symbol_map = getattr(self.data, "symbol_map", None)
+        short = (self.instruments().get(ticker) or {}).get("shortName") or ""
+        if (symbol_map is not None and ticker not in symbol_map and ticker.endswith("_US_EQ")
+                and re.fullmatch(r"[A-Z][A-Z0-9.]*", short)):
+            symbol_map[ticker] = short.replace(".", "-")
 
     # ---- balances & prices ------------------------------------------------------------
     def account_summary(self, max_age: float = 5.0) -> dict:
