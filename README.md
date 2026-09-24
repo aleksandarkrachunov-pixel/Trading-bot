@@ -97,7 +97,7 @@ Trading 212's API works with **Invest** and **Stocks ISA** accounts. Test on the
 1. In the Trading 212 app, switch to your **Practice** account, then open
    *Settings → API (Beta) → Generate API key*. Give it these permissions: account,
    portfolio, orders:read, orders:execute, history:orders and metadata.
-2. Put the key and secret in `.env`:
+2. Run `python -m tradingbot setup` and paste the key and secret when asked (input is hidden). Or put them in `.env` yourself:
    ```
    T212_API_KEY=...
    T212_API_SECRET=...

@@ -225,6 +225,48 @@ def cmd_telegram_test(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_setup(args, cfg: Config) -> int:
+    """Interactive first-time setup: writes .env and config.yaml for Trading 212 demo."""
+    import getpass
+    import shutil
+
+    env_path = Path(".env")
+    env: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+
+    print("Trading 212 API credentials (input is hidden; press Enter to keep the current value)")
+    for key, label in (("T212_API_KEY", "API key"), ("T212_API_SECRET", "API secret")):
+        value = getpass.getpass(f"  {label}: ").strip()
+        if value:
+            env[key] = value
+    print("Telegram (optional, press Enter to skip)")
+    token = getpass.getpass("  Bot token from @BotFather: ").strip()
+    if token:
+        env["TELEGRAM_BOT_TOKEN"] = token
+    chat = input("  Chat id (leave empty if you don't know it yet): ").strip()
+    if chat:
+        env["TELEGRAM_CHAT_ID"] = chat
+
+    env_path.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
+    print(f"Saved {env_path.resolve()}")
+
+    if not Path("config.yaml").exists():
+        shutil.copy("config.trading212.example.yaml", "config.yaml")
+        print("Created config.yaml (Trading 212 DEMO, AAPL_US_EQ)")
+    else:
+        print("config.yaml already exists, left unchanged")
+    print("\nNext: python -m tradingbot t212-check")
+    return 0
+
+
 def cmd_status(args, cfg: Config) -> int:
     files = sorted(Path(cfg.engine.state_dir).glob("*.json"))
     if not files:
@@ -293,6 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--test-trade", action="store_true", help="Buy and immediately sell --qty shares (demo only)")
     t.add_argument("--qty", type=float, default=0.1)
 
+    sub.add_parser("setup", help="First-time setup: enter your API keys, creates .env and config.yaml")
     sub.add_parser("telegram-test", help="Send a Telegram test message (or discover your chat id)")
     sub.add_parser("status", help="Show saved bot state")
     sub.add_parser("reset-halt", help="Clear a triggered max-drawdown kill switch")
@@ -309,6 +352,6 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "backtest": cmd_backtest, "optimize": cmd_optimize, "download": cmd_download,
         "paper": cmd_run, "live": cmd_run, "status": cmd_status, "reset-halt": cmd_reset_halt,
-        "t212-check": cmd_t212_check, "telegram-test": cmd_telegram_test,
+        "t212-check": cmd_t212_check, "setup": cmd_setup, "telegram-test": cmd_telegram_test,
     }
     return handlers[args.command](args, cfg)
