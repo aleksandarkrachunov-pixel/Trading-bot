@@ -29,7 +29,7 @@ what runs live. **Telegram** sends you alerts and lets you control the bot from 
   - saves state to disk after each step, so it resumes after a restart or crash
   - graceful shutdown on Ctrl-C / SIGTERM, and a `STOP` file kill switch
 - **Trading 212:** demo (practice) or live account via the official API, with prices and market hours from Yahoo Finance. Includes a connection check and a demo test trade.
-- **Stock scanner:** ranks ~45 large US stocks (or your own list) by risk-adjusted momentum and trades the best one with a buy signal.
+- **Stock scanner:** ranks ~45 large US stocks (or your own list) by risk-adjusted momentum and holds the top picks with a buy signal (up to `max_positions` at once).
 - **Telegram:** alerts for trades, the kill switch, errors and a daily status. Control the bot with `/status` and `/stop`.
 - **Safety defaults:** paper mode by default. Live trading needs API keys *and* the `--confirm-live` flag.
 
@@ -135,9 +135,13 @@ doesn't stick to `exchange.symbol`. It ranks a list of stocks and trades the bes
   the volatility over the same window. A steady climb beats a choppy one with the same gain.
 - **Eligible:** the strategy must currently say "buy" (e.g. fast MA above slow MA), the score
   must be positive and the price at least `min_price`.
-- **Rotation:** while flat, the bot rescans every `rescan_minutes` and switches to the top
-  eligible stock. Once it buys, it holds that stock until the stop, the strategy exit or the
-  kill switch closes the position, then scans again. It holds one stock at a time.
+- **Several positions:** `max_positions` (3 in the example config) is how many stocks the bot
+  holds at once. Each position has its own stop and risks `risk_per_trade` of equity, and is
+  capped at `max_position_pct / max_positions` of equity, so 3 positions use at most 95% of the
+  account. Cash, the drawdown kill switch and the daily loss limit are shared.
+- **Rotation:** while a position slot is free, the bot rescans every `rescan_minutes` and fills
+  it with the best eligible stock it doesn't already hold. It holds each stock until the stop,
+  the strategy exit or the kill switch closes it, then that slot takes the next pick.
 - **Universe:** `scanner.universe` lists Trading 212 tickers. Leave it empty for ~45 large US
   stocks (Apple, Microsoft, Nvidia, Meta, JPMorgan, Eli Lilly, Exxon, ...). Tickers not on
   Trading 212, or in a different currency from `exchange.symbol`, are skipped so equity and
@@ -217,6 +221,15 @@ updating its state file for 15 minutes.
 
 Set up Telegram (see below) on an always-on machine: it is how you hear about trades,
 errors and the kill switch without logging in.
+
+### Lost state file? The bot takes over what the account holds
+
+With `trading212.adopt_positions: true` (on in the Trading 212 example config), a bot that
+starts **without** a state file takes over the stocks the account already holds, as long as
+they're in the scanner universe (or are `exchange.symbol`), up to `max_positions`. It uses
+Trading 212's average price as the entry and rebuilds the stop from ATR, then tells you on
+Telegram. Turn it off if you also hold stocks by hand in that account: the bot would manage,
+and eventually sell, the ones it takes over.
 
 ### Moving a running bot to another machine
 

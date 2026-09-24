@@ -15,9 +15,12 @@ trading212:
   extended_hours: false
   quantity_decimals: 2   # fractional share precision
   order_timeout: 60
+  adopt_positions: true  # after a lost state file, take over a held scanner stock (and its stop).
+                         # Set false if you also hold stocks by hand in this account.
 
 scanner:
-  enabled: true          # trade the best-ranked stock instead of only exchange.symbol
+  enabled: true          # trade the best-ranked stocks instead of only exchange.symbol
+  max_positions: 3       # hold up to 3 stocks at once, each capped at max_position_pct / 3 of equity
   universe: []           # T212 tickers to scan; empty = ~45 large US stocks (AAPL, MSFT, NVDA, ...)
   lookback_bars: 120     # momentum window in candles (120 x 1h ~ 4 trading weeks)
   rescan_minutes: 60     # rescan this often while flat; holds a stock until the position closes

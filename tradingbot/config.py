@@ -59,11 +59,15 @@ class Trading212Config:
     extended_hours: bool = False
     quantity_decimals: int = 2         # fractional share precision accepted for your instrument
     order_timeout: int = 60            # seconds to wait for a fill before cancelling
+    # On a fresh start (no state file), take over a position already held in the account
+    # (exchange.symbol, or any scanner stock). Leave off if you also hold stocks by hand.
+    adopt_positions: bool = False
 
 
 @dataclass
 class ScannerConfig:
     enabled: bool = False              # trade the best stock from `universe` instead of exchange.symbol
+    max_positions: int = 1             # hold up to this many of the top-ranked stocks at once
     universe: list[str] = field(default_factory=list)  # tickers to scan; empty = built-in large-cap US list
     lookback_bars: int = 120           # momentum window, in candles of exchange.timeframe
     rescan_minutes: float = 60         # how often to rescan while flat
@@ -159,5 +163,7 @@ def validate(cfg: Config) -> None:
         raise ValueError("engine.mode must be 'paper' or 'live'")
     if cfg.trading212.environment not in ("demo", "live"):
         raise ValueError("trading212.environment must be 'demo' or 'live'")
+    if cfg.scanner.max_positions < 1:
+        raise ValueError("scanner.max_positions must be >= 1")
     if cfg.scanner.lookback_bars < 2:
         raise ValueError("scanner.lookback_bars must be >= 2")

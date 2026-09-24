@@ -43,7 +43,7 @@ def test_engine_trades_and_persists_state(tmp_path):
         ex.cursor += 1
     assert engine.trader.trades, "expected the engine to trade on synthetic data"
     state = json.loads(engine.state_file.read_text())
-    assert len(state["trader"]["trades"]) == len(engine.trader.trades)
+    assert len(state["slots"][0]["trader"]["trades"]) == len(engine.trader.trades)
 
     # A fresh engine resumes the same position and balances.
     resumed, _ = make_engine(tmp_path, df)

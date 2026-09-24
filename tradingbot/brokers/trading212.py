@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import re
@@ -127,8 +128,7 @@ class Trading212Broker(Broker):
         self.quantity_decimals = quantity_decimals
         self.order_timeout = order_timeout
         self._sleep = sleep
-        self._summary: tuple[float, dict] | None = None
-        self._instruments: dict[str, dict] | None = None
+        self._cache: dict = {"summary": None}  # shared with sibling brokers
 
         summary = self.account_summary()
         self.account_currency = summary.get("currency", "")
@@ -146,11 +146,17 @@ class Trading212Broker(Broker):
                  self.client.environment.upper(), self.account_currency, ticker,
                  instrument.get("name", "?"), self.instrument_currency)
 
+    def sibling(self, ticker: str) -> "Trading212Broker":
+        """Another broker on the same account for a second stock (shares API client and caches)."""
+        other = copy.copy(self)
+        other.set_symbol(ticker)
+        return other
+
     def instruments(self) -> dict[str, dict]:
         """All tradable instruments by ticker (fetched once: the endpoint allows 1 call / 50s)."""
-        if self._instruments is None:
-            self._instruments = {i["ticker"]: i for i in self.client.instruments() if i.get("ticker")}
-        return self._instruments
+        if "instruments" not in self._cache:
+            self._cache["instruments"] = {i["ticker"]: i for i in self.client.instruments() if i.get("ticker")}
+        return self._cache["instruments"]
 
     def _find_instrument(self, ticker: str) -> dict:
         inst = self.instruments().get(ticker)
@@ -197,9 +203,10 @@ class Trading212Broker(Broker):
     # ---- balances & prices ------------------------------------------------------------
     def account_summary(self, max_age: float = 5.0) -> dict:
         """Cached account summary (the endpoint allows 1 request / 5s)."""
-        if self._summary is None or time.monotonic() - self._summary[0] > max_age:
-            self._summary = (time.monotonic(), self.client.account_summary())
-        return self._summary[1]
+        cached = self._cache["summary"]
+        if cached is None or time.monotonic() - cached[0] > max_age:
+            cached = self._cache["summary"] = (time.monotonic(), self.client.account_summary())
+        return cached[1]
 
     def _fx(self) -> float:
         """Instrument-currency units per 1 account-currency unit."""
@@ -210,6 +217,18 @@ class Trading212Broker(Broker):
             if (p.get("instrument") or {}).get("ticker", p.get("ticker")) == self.symbol:
                 return float(p.get("quantityAvailableForTrading", p.get("quantity")) or 0.0)
         return 0.0
+
+    def held_positions(self) -> list[dict]:
+        """Every position in the account: [{ticker, qty, avg_price (instrument currency), opened}]."""
+        out = []
+        for p in self.client.positions():
+            ticker = (p.get("instrument") or {}).get("ticker", p.get("ticker"))
+            qty = float(p.get("quantityAvailableForTrading", p.get("quantity")) or 0.0)
+            avg = p.get("averagePricePaid", p.get("averagePrice"))
+            if ticker and qty > 0 and avg:
+                out.append({"ticker": ticker, "qty": qty, "avg_price": float(avg),
+                            "opened": p.get("createdAt") or p.get("initialFillDate") or ""})
+        return out
 
     def balances(self) -> tuple[float, float]:
         cash = float((self.account_summary().get("cash") or {}).get("availableToTrade") or 0.0)
@@ -236,7 +255,7 @@ class Trading212Broker(Broker):
         signed = qty if side == "buy" else -qty
         before = self.position_qty()
         log.info("Trading 212 %s market %s %s x %s", self.client.environment.upper(), side.upper(), qty, self.symbol)
-        self._summary = None  # cash changes after this order
+        self._cache["summary"] = None  # cash changes after this order
         order = self.client.place_market_order(self.symbol, signed, self.extended_hours)
         order_id = order["id"]
 

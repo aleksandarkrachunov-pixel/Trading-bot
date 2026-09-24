@@ -98,8 +98,12 @@ class Scanner:
         now = time.time() if now is None else now
         return self.last_scan is None or now - self.last_scan >= self.cfg.rescan_minutes * 60
 
+    def eligible(self) -> list[ScanResult]:
+        """Stocks with a buy signal and positive momentum, best first."""
+        return [r for r in self.results if r.eligible(self.cfg.min_price)]
+
     def best(self) -> ScanResult | None:
-        return next((r for r in self.results if r.eligible(self.cfg.min_price)), None)
+        return next(iter(self.eligible()), None)
 
     def summary(self, top: int = 5) -> str:
         if not self.results:

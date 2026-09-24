@@ -312,10 +312,16 @@ def cmd_status(args, cfg: Config) -> int:
         return 0
     for f in files:
         d = json.loads(f.read_text())
-        trades = d["trader"]["trades"]
+        slots = d.get("slots") or [{"symbol": d.get("symbol"), "trader": d["trader"]}]
+        trades = [t for s in slots for t in s["trader"]["trades"]]
         pnl = sum(t["pnl"] for t in trades)
         print(f"== {f.name} (updated {d.get('updated')})")
-        print(f"   position: {json.dumps(d['trader']['position'])}")
+        held = [s for s in slots if s["trader"]["position"]["qty"] > 0]
+        for s in held:
+            p = s["trader"]["position"]
+            print(f"   position: {s.get('symbol')} qty {p['qty']:g} @ {p['entry_price']:.4f} · stop {p['stop']:.4f}")
+        if not held:
+            print("   position: flat")
         print(f"   risk:     {json.dumps(d['risk'])}")
         print(f"   trades:   {len(trades)}  realised PnL: {pnl:.2f}")
         if "paper" in d:

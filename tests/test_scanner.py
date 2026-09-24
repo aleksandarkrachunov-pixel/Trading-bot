@@ -1,4 +1,7 @@
+import json
+
 import numpy as np
+import pytest
 import pandas as pd
 
 from fakes import FakeSession
@@ -36,6 +39,8 @@ class MultiData:
 
     def price(self, symbol):
         return float(self.frames[symbol]["close"].iloc[-1])
+
+    last_price = price
 
 
 FRAMES = {
@@ -86,13 +91,16 @@ def test_scan_due_after_rescan_interval():
     assert sc.due(now=sc.last_scan + 3601)
 
 
-def make_engine(tmp_path, frames=FRAMES, start="FALLING_US_EQ"):
+def make_engine(tmp_path, frames=FRAMES, start="FALLING_US_EQ", max_positions=1):
     cfg = Config()
     cfg.engine.state_dir = str(tmp_path)
     cfg.engine.history_bars = 200
+    cfg.scanner.max_positions = max_positions
     sc, data = make_scanner(frames)
     broker = PaperBroker(start, 10_000, price_source=lambda: data.price(broker.symbol))
-    return Engine(cfg, create_strategy("sma_crossover"), broker, data, scanner=sc), data
+    engine = Engine(cfg, create_strategy("sma_crossover"), broker, data, scanner=sc)
+    engine.scanner.cfg.max_positions = max_positions
+    return engine, data
 
 
 def test_engine_switches_to_best_stock_and_buys(tmp_path):
@@ -124,6 +132,10 @@ def test_engine_stays_flat_when_nothing_is_eligible(tmp_path):
     assert engine.symbol == "FALLING_US_EQ" and not engine.trader.position.is_open
 
 
+def api_calls(api):
+    return [url for _, url, _, _ in api_calls.session.calls]
+
+
 def test_trading212_set_symbol_and_tradable_filter():
     class MultiT212(FakeT212):
         def __call__(self, method, url, params, json):
@@ -141,7 +153,9 @@ def test_trading212_set_symbol_and_tradable_filter():
             return super().__call__(method, url, params, json)
 
     api = MultiT212()
-    client = Trading212Client("k", "s", "demo", session=FakeSession(api), sleep=lambda s: None)
+    session = FakeSession(api)
+    api_calls.session = session
+    client = Trading212Client("k", "s", "demo", session=session, sleep=lambda s: None)
     data = FakeData()
     data.symbol_map = {}
     broker = Trading212Broker(client, "AAPL_US_EQ", data, sleep=lambda s: None)
@@ -151,10 +165,113 @@ def test_trading212_set_symbol_and_tradable_filter():
     assert data.symbol_map["FB_US_EQ"] == "META" and data.symbol_map["CTRA_US_EQ"] == "AMR"
     broker.set_symbol("MSFT_US_EQ")
     assert broker.symbol == "MSFT_US_EQ" and broker.instrument["name"] == "Microsoft"
-    assert api.instrument_calls == 1  # instrument list is cached
+    other = broker.sibling("FB_US_EQ")
+    assert other.symbol == "FB_US_EQ" and broker.symbol == "MSFT_US_EQ"
+    summaries = sum(1 for c in api_calls(api) if c.endswith("/account/summary"))
+    other.balances()
+    broker.balances()
+    assert sum(1 for c in api_calls(api) if c.endswith("/account/summary")) == summaries  # shared cache
+    assert api.instrument_calls == 1  # instrument list is cached and shared
 
 
 def test_default_universe():
     from tradingbot.scanner import DEFAULT_UNIVERSE
     assert len(DEFAULT_UNIVERSE) == len(set(DEFAULT_UNIVERSE)) == 45
     assert {"FB_US_EQ", "AMD_US_EQ", "TSLA_US_EQ"} <= set(DEFAULT_UNIVERSE)
+
+
+MORE = {**FRAMES, "RISING_US_EQ": trend(0.0015, seed=4), "CLIMB_US_EQ": trend(0.001, seed=5)}
+
+
+def test_engine_holds_several_positions_sharing_cash(tmp_path):
+    engine, _ = make_engine(tmp_path, MORE, max_positions=3)
+    engine.step()
+    held = [s.symbol for s in engine.open_slots]
+    assert len(held) == 3 and len(set(held)) == 3
+    assert "FALLING_US_EQ" not in held
+    assert held == [r.symbol for r in engine.scanner.eligible()[:3]]
+    # One cash account: every buy came out of it, and no position exceeds its share.
+    value = sum(s.trader.position.qty * s.last_price for s in engine.open_slots)
+    assert engine.broker.cash == pytest.approx(10_000 - value, abs=50)  # minus fees and slippage
+    for s in engine.open_slots:
+        assert s.trader.position.qty * s.last_price <= 10_000 * engine.cfg.risk.max_position_pct / 3 * 1.01
+
+    resumed, _ = make_engine(tmp_path, MORE, max_positions=3)
+    assert [s.symbol for s in resumed.open_slots] == held
+    assert resumed.broker.cash == pytest.approx(engine.broker.cash)
+    assert "RISING_US_EQ" in resumed.status_text() or "CLIMB_US_EQ" in resumed.status_text()
+
+
+def test_free_slot_goes_idle_when_nothing_else_is_eligible(tmp_path):
+    frames = {k: MORE[k] for k in ("STEADY_US_EQ", "RISING_US_EQ", "FALLING_US_EQ")}  # 2 uptrends
+    engine, _ = make_engine(tmp_path, frames, max_positions=3)
+    engine.step()
+    assert len(engine.open_slots) == 2
+    idle = [s for s in engine.slots if not s.is_open]
+    assert len(idle) == 1 and not idle[0].active
+
+
+def test_kill_switch_closes_every_position(tmp_path):
+    engine, _ = make_engine(tmp_path, MORE, max_positions=3)
+    engine.step()
+    engine.risk.state.halted, engine.risk.state.halt_reason = True, "test"
+    engine.step()
+    assert not engine.open_slots
+    assert all(t.exit_reason == "kill_switch" for s in engine.slots for t in s.trader.trades)
+
+
+def test_loads_single_position_state_from_before_slots(tmp_path):
+    engine, _ = make_engine(tmp_path)
+    old = {"risk": engine.risk.state.to_dict(), "last_bar": "2026-01-01", "symbol": "STEADY_US_EQ",
+           "trader": {"position": {"qty": 3.0, "entry_price": 100.0, "stop": 90.0}, "trades": []},
+           "paper": {"cash": 9700.0, "position": 3.0}}
+    engine.state_file.write_text(json.dumps(old))
+    resumed, _ = make_engine(tmp_path, max_positions=2)
+    assert resumed.symbol == "STEADY_US_EQ" and resumed.trader.position.qty == 3.0
+    assert resumed.broker.cash == 9700.0 and resumed.broker.position == 3.0
+    assert resumed.last_bar == "2026-01-01" and len(resumed.slots) == 2
+
+
+class AdoptBroker(PaperBroker):
+    """Paper broker that reports positions already held in the account."""
+
+    def __init__(self, held, **kw):
+        super().__init__("FALLING_US_EQ", 10_000, **kw)
+        self.held = held
+
+    def held_positions(self):
+        return self.held
+
+
+def test_fresh_start_takes_over_held_positions(tmp_path):
+    cfg = Config()
+    cfg.engine.state_dir = str(tmp_path)
+    cfg.engine.history_bars = 200
+    cfg.scanner.max_positions = 2
+    sc, data = make_scanner(MORE)
+    held = [{"ticker": "STEADY_US_EQ", "qty": 5.0, "avg_price": 100.0, "opened": "2026-09-24T19:32"},
+            {"ticker": "CLIMB_US_EQ", "qty": 1.0, "avg_price": 100.0, "opened": ""},
+            {"ticker": "RISING_US_EQ", "qty": 2.0, "avg_price": 100.0, "opened": ""},
+            {"ticker": "MANUAL_US_EQ", "qty": 50.0, "avg_price": 100.0, "opened": ""}]  # not in universe
+    broker = AdoptBroker(held, price_source=lambda: data.price(broker.symbol))
+    engine = Engine(cfg, create_strategy("sma_crossover"), broker, data, scanner=sc)
+    notifier = []
+    engine.notifier.send = lambda text, **kw: notifier.append(text)
+    assert engine.adopt_positions() == 2
+    got = {s.symbol: s.trader.position for s in engine.open_slots}
+    assert set(got) == {"STEADY_US_EQ", "RISING_US_EQ"}  # the two largest in the universe
+    steady = got["STEADY_US_EQ"]
+    assert steady.qty == 5.0 and steady.entry_price == 100.0 and steady.entry_time == "2026-09-24T19:32"
+    assert 0 < steady.stop < data.price("STEADY_US_EQ")
+    assert any("CLIMB_US_EQ" in m for m in notifier)  # told which one it isn't managing
+    # A restart with a state file never adopts again.
+    again = Engine(cfg, create_strategy("sma_crossover"), AdoptBroker(held), data, scanner=sc)
+    assert again.resumed and again.adopt_positions() == 0
+
+
+def test_paper_and_trading212_siblings_share_the_account():
+    a = PaperBroker("A", 1000.0)
+    b = a.sibling("B")
+    b.set_price(10.0)
+    b.market_buy(5)
+    assert a.cash == b.cash < 1000.0 and a.position == 0 and b.position == 5

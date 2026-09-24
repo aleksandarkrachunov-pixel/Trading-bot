@@ -16,15 +16,28 @@ class PaperBroker(Broker):
         slippage: float = 0.0005,
         price_source: Callable[[], float] | None = None,
         base_balance: float = 0.0,
+        account: dict | None = None,
     ):
         super().__init__(symbol)
-        self.cash = float(initial_cash)
+        self._account = account if account is not None else {"cash": float(initial_cash)}
         self.position = float(base_balance)
         self.fee_rate = fee_rate
         self.slippage = slippage
         self._price_source = price_source
         self._price: float | None = None
         self._ids = itertools.count(1)
+
+    @property
+    def cash(self) -> float:
+        return self._account["cash"]
+
+    @cash.setter
+    def cash(self, value: float) -> None:
+        self._account["cash"] = float(value)
+
+    def sibling(self, symbol: str, price_source: Callable[[], float] | None = None) -> "PaperBroker":
+        """Another broker on the same cash account, for holding a second stock."""
+        return PaperBroker(symbol, 0.0, self.fee_rate, self.slippage, price_source, account=self._account)
 
     def set_price(self, price: float) -> None:
         self._price = float(price)
