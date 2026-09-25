@@ -432,7 +432,14 @@ class Engine:
     def _rescan(self) -> None:
         """Rank the universe and give each flat slot the best stock that no other slot holds."""
         results = self.scanner.scan()
-        picks = [r for r in self.scanner.eligible() if r.symbol not in {s.symbol for s in self.open_slots}]
+        # A stock stopped out today is skipped: its slot would otherwise sit idle waiting for the
+        # trend to reset (no re-entry after a stop) while other picks go unbought.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        stopped = {t.symbol for s in self.slots for t in s.trader.trades
+                   if t.exit_reason == "stop_loss" and t.exit_time.startswith(today)}
+        stopped |= {s.symbol for s in self.slots if not s.is_open and s.trader.position.wait_for_reset}
+        held = {s.symbol for s in self.open_slots}
+        picks = [r for r in self.scanner.eligible() if r.symbol not in held | stopped]
         log.info("Scanned %d stocks; eligible: %s", len(results),
                  ", ".join(f"{r.symbol} ({r.score:+.2f})" for r in picks[:5]) or "none")
         flat = [s for s in self.slots if not s.is_open]

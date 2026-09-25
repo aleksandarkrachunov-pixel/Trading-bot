@@ -297,3 +297,19 @@ def test_one_failing_stock_does_not_block_others_or_the_save(tmp_path):
     assert engine.slots[0].is_open and engine.slots[2].is_open and not engine.slots[1].is_open
     state = json.loads(engine.state_file.read_text())
     assert sum(s["trader"]["position"]["qty"] > 0 for s in state["slots"]) == 2
+
+
+def test_stock_stopped_out_today_is_skipped_so_the_slot_is_reused(tmp_path):
+    frames = {**MORE, "FOURTH_US_EQ": trend(0.0008, seed=6)}
+    engine, _ = make_engine(tmp_path, frames, max_positions=3)
+    engine.step()
+    assert len(engine.scanner.eligible()) >= 4
+    slot = next(s for s in engine.slots if s.symbol == "RISING_US_EQ")
+    p = slot.trader.position.stop - 1  # price gaps below the stop
+    slot.trader.check_exits(p, p, p, pd.Timestamp.now(tz="UTC"))
+    assert not slot.is_open and slot.trader.trades[-1].symbol == "RISING_US_EQ"
+    engine.scanner.last_scan = None
+    engine._rescan()
+    # RISING is still the top-ranked stock, but the free slot moves on to the next pick.
+    assert slot.symbol == "FOURTH_US_EQ" and slot.active
+    assert slot.symbol not in {s.symbol for s in engine.open_slots}

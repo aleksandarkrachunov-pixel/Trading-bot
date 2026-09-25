@@ -38,6 +38,7 @@ class Trade:
     pnl: float           # net of fees, quote currency
     return_pct: float
     exit_reason: str
+    symbol: str = ""     # empty in trades recorded before this field existed
 
 
 @dataclass
@@ -121,7 +122,7 @@ class Trader:
         trade = Trade(
             entry_time=pos.entry_time, exit_time=str(now), entry_price=pos.entry_price,
             exit_price=fill.price, qty=fill.qty, pnl=pnl,
-            return_pct=pnl / (cost * fill.qty / pos.qty), exit_reason=reason,
+            return_pct=pnl / (cost * fill.qty / pos.qty), exit_reason=reason, symbol=self.broker.symbol,
         )
         self.trades.append(trade)
         log.info("SELL %.6f @ %.4f reason=%s pnl=%.2f (%.2f%%)",
