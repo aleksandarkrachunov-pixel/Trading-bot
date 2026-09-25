@@ -147,11 +147,13 @@ class Engine:
         while len(self.slots) < len(saved):
             self.slots.append(Slot(None, Trader(None, self.risk, notifier=self.notifier), active=False))
         for slot, sd in zip(self.slots, saved):
-            slot.trader.load_dict(sd["trader"])
             symbol = sd.get("symbol")
-            if self.scanner and symbol and (sd.get("active", True) or slot.is_open):
+            held = (sd["trader"].get("position") or {}).get("qty", 0) > 0
+            if self.scanner and symbol and (sd.get("active", True) or held):
                 self._assign(slot, symbol)
-                slot.active = sd.get("active", True) or slot.is_open
+                slot.active = sd.get("active", True) or held
+            # After _assign, which resets per-stock flags: the saved position (incl. wait_for_reset) wins.
+            slot.trader.load_dict(sd["trader"])
             slot.last_bar = sd.get("last_bar", "")
             if isinstance(slot.broker, PaperBroker) and sd.get("paper_position") is not None:
                 slot.broker.position = float(sd["paper_position"])

@@ -313,3 +313,15 @@ def test_stock_stopped_out_today_is_skipped_so_the_slot_is_reused(tmp_path):
     # RISING is still the top-ranked stock, but the free slot moves on to the next pick.
     assert slot.symbol == "FOURTH_US_EQ" and slot.active
     assert slot.symbol not in {s.symbol for s in engine.open_slots}
+
+
+def test_restart_remembers_a_stopped_out_stock(tmp_path):
+    engine, _ = make_engine(tmp_path, MORE, max_positions=3)
+    engine.step()
+    slot = next(s for s in engine.slots if s.symbol == "RISING_US_EQ")
+    p = slot.trader.position.stop - 1
+    slot.trader.check_exits(p, p, p, pd.Timestamp.now(tz="UTC"))
+    engine.save_state()
+    resumed, _ = make_engine(tmp_path, MORE, max_positions=3)
+    again = next(s for s in resumed.slots if s.symbol == "RISING_US_EQ")
+    assert again.trader.position.wait_for_reset  # no immediate re-buy after the restart
