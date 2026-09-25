@@ -59,6 +59,20 @@ class Trading212Config:
     extended_hours: bool = False
     quantity_decimals: int = 2         # fractional share precision accepted for your instrument
     order_timeout: int = 60            # seconds to wait for a fill before cancelling
+    # At startup, take over positions held in the account that the bot isn't tracking
+    # (exchange.symbol, or any scanner stock). Leave off if you also hold stocks by hand.
+    adopt_positions: bool = False
+
+
+@dataclass
+class ScannerConfig:
+    enabled: bool = False              # trade the best stock from `universe` instead of exchange.symbol
+    max_positions: int = 1             # hold up to this many of the top-ranked stocks at once
+    universe: list[str] = field(default_factory=list)  # tickers to scan; empty = built-in large-cap US list
+    lookback_bars: int = 120           # momentum window, in candles of exchange.timeframe
+    rescan_minutes: float = 60         # how often to rescan while flat
+    min_price: float = 5.0             # ignore penny stocks
+    request_delay: float = 0.3         # seconds between price-data requests
 
 
 @dataclass
@@ -77,6 +91,7 @@ class Config:
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     trading212: Trading212Config = field(default_factory=Trading212Config)
+    scanner: ScannerConfig = field(default_factory=ScannerConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
     @property
@@ -127,6 +142,7 @@ def load_config(path: str | Path | None = None) -> Config:
         backtest=_build(BacktestConfig, raw.get("backtest")),
         engine=_build(EngineConfig, raw.get("engine")),
         trading212=_build(Trading212Config, raw.get("trading212")),
+        scanner=_build(ScannerConfig, raw.get("scanner")),
         telegram=_build(TelegramConfig, raw.get("telegram")),
     )
     validate(cfg)
@@ -147,3 +163,7 @@ def validate(cfg: Config) -> None:
         raise ValueError("engine.mode must be 'paper' or 'live'")
     if cfg.trading212.environment not in ("demo", "live"):
         raise ValueError("trading212.environment must be 'demo' or 'live'")
+    if cfg.scanner.max_positions < 1:
+        raise ValueError("scanner.max_positions must be >= 1")
+    if cfg.scanner.lookback_bars < 2:
+        raise ValueError("scanner.lookback_bars must be >= 2")

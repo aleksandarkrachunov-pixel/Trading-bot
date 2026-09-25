@@ -29,6 +29,7 @@ what runs live. **Telegram** sends you alerts and lets you control the bot from 
   - saves state to disk after each step, so it resumes after a restart or crash
   - graceful shutdown on Ctrl-C / SIGTERM, and a `STOP` file kill switch
 - **Trading 212:** demo (practice) or live account via the official API, with prices and market hours from Yahoo Finance. Includes a connection check and a demo test trade.
+- **Stock scanner:** ranks ~45 large US stocks (or your own list) by risk-adjusted momentum and holds the top picks with a buy signal (up to `max_positions` at once).
 - **Telegram:** alerts for trades, the kill switch, errors and a daily status. Control the bot with `/status` and `/stop`.
 - **Safety defaults:** paper mode by default. Live trading needs API keys *and* the `--confirm-live` flag.
 
@@ -79,15 +80,7 @@ python -m tradingbot status             # position, PnL, risk state
 python -m tradingbot live --confirm-live
 ```
 
-Run it on an always-on machine (VPS), for example with Docker:
-
-```bash
-docker build -t tradingbot .
-docker run -d --restart unless-stopped --name tradingbot \
-  -v $PWD/config.yaml:/app/config.yaml -v $PWD/.env:/app/.env \
-  -v $PWD/state:/app/state -v $PWD/logs:/app/logs \
-  tradingbot live --confirm-live
-```
+To keep it running around the clock, see [Run it 24/7](#run-it-247).
 
 ## Trading 212 (stocks & ETFs)
 
@@ -104,7 +97,7 @@ Trading 212's API works with **Invest** and **Stocks ISA** accounts. Test on the
    ```
 3. Use the Trading 212 config:
    ```bash
-   cp config.trading212.example.yaml config.yaml   # set exchange.symbol, e.g. AAPL_US_EQ
+   cp config.trading212.example.yaml config.yaml   # stock scanner on; see below
    ```
 4. Check the connection, then place a tiny test round trip (buy 0.1 share and sell it back).
    The test trade needs the market to be open.
@@ -133,6 +126,36 @@ How it works:
 - **Going live:** set `trading212.environment: live`, use a key from your real account, and run
   `python -m tradingbot live --confirm-live`.
 
+### Stock scanner: trade the best stock, not just one
+
+With `scanner.enabled: true` (the default in `config.trading212.example.yaml`), the bot
+doesn't stick to `exchange.symbol`. It ranks a list of stocks and trades the best one:
+
+- **Score:** risk-adjusted momentum, i.e. the return over `lookback_bars` candles divided by
+  the volatility over the same window. A steady climb beats a choppy one with the same gain.
+- **Eligible:** the strategy must currently say "buy" (e.g. fast MA above slow MA), the score
+  must be positive and the price at least `min_price`.
+- **Several positions:** `max_positions` (3 in the example config) is how many stocks the bot
+  holds at once. Each position has its own stop and risks `risk_per_trade` of equity, and is
+  capped at `max_position_pct / max_positions` of equity, so 3 positions use at most 95% of the
+  account. Cash, the drawdown kill switch and the daily loss limit are shared.
+- **Rotation:** while a position slot is free, the bot rescans every `rescan_minutes` and fills
+  it with the best eligible stock it doesn't already hold. It holds each stock until the stop,
+  the strategy exit or the kill switch closes it, then that slot takes the next pick.
+- **Universe:** `scanner.universe` lists Trading 212 tickers. Leave it empty for ~45 large US
+  stocks (Apple, Microsoft, Nvidia, Meta, JPMorgan, Eli Lilly, Exxon, ...). Tickers not on
+  Trading 212, or in a different currency from `exchange.symbol`, are skipped so equity and
+  the drawdown limit stay in one currency. You can write `META_US_EQ`; the bot finds
+  Trading 212's `FB_US_EQ`.
+
+```bash
+python -m tradingbot scan                     # show today's ranking and the pick (no trading)
+python -m tradingbot scan --symbols NVDA_US_EQ,AMD_US_EQ,INTC_US_EQ
+```
+
+On Telegram, `/scan` shows the latest top 5. Backtests still test one stock
+(`exchange.symbol`), so backtest a few of the top picks before trusting the scanner.
+
 ## Telegram alerts & remote control
 
 1. In Telegram, message **@BotFather** → `/newbot`, and copy the token into `.env` as `TELEGRAM_BOT_TOKEN`.
@@ -155,7 +178,71 @@ Commands (accepted only from your own chat):
 |---|---|
 | `/status` | equity, price, position, stop, PnL, market open/closed |
 | `/stop` | close the position and shut the bot down (for stocks, at the next market open) |
+| `/scan` | latest stock-scanner ranking (top 5), when the scanner is on |
 | `/help` | list commands |
+
+## Run it 24/7
+
+The bot has to keep running to watch its stop-loss: the stop is checked by the bot, not
+placed as an order at the broker. Run it on a machine that stays on: a small Linux VPS
+(1 CPU / 1 GB RAM is enough), a Raspberry Pi, or a home server.
+
+**Linux (Ubuntu/Debian), one command:**
+
+```bash
+git clone -b claude/jolly-franklin-a9obyc https://github.com/aleksandarkrachunov-pixel/Trading-bot.git
+cd Trading-bot && ./deploy/install.sh
+```
+
+It installs Docker if needed, asks for your Trading 212 key (and optional Telegram token),
+creates `config.yaml` from the Trading 212 example, checks the connection and starts the bot.
+
+**Any machine with Docker (Linux, macOS, Windows with Docker Desktop):**
+
+```bash
+cp .env.example .env                       # fill in T212_API_KEY / T212_API_SECRET
+cp config.trading212.example.yaml config.yaml
+docker compose up -d --build
+```
+
+`docker-compose.yml` restarts the bot after a crash or a reboot, keeps `state/` and `logs/`
+on the host, and caps Docker's log size. The container reports **unhealthy** if the bot stops
+updating its state file for 15 minutes.
+
+| Task | Command |
+|---|---|
+| Watch the log | `docker compose logs -f` |
+| Health / running? | `docker compose ps` |
+| Position and PnL | `docker compose run --rm bot status` |
+| Today's stock ranking | `docker compose run --rm bot scan` |
+| Stop (keeps the position) | `docker compose stop` |
+| Sell and stop | `touch state/STOP` (or `/stop` on Telegram) |
+| Update to the latest code | `git pull && docker compose up -d --build` |
+
+Set up Telegram (see below) on an always-on machine: it is how you hear about trades,
+errors and the kill switch without logging in.
+
+### Lost state file? The bot takes over what the account holds
+
+With `trading212.adopt_positions: true` (on in the Trading 212 example config), the bot checks
+at startup for stocks the account holds that it isn't tracking (lost state file, or a crash
+right after a fill) and takes them over, as long as they're in the scanner universe (or are
+`exchange.symbol`) and a position slot is free. It uses
+Trading 212's average price as the entry and rebuilds the stop from ATR, then tells you on
+Telegram. Turn it off if you also hold stocks by hand in that account: the bot would manage,
+and eventually sell, the ones it takes over.
+
+### Moving a running bot to another machine
+
+The open position lives in `state/*.json`. To move the bot without losing track of it:
+
+1. Stop the old bot gracefully (Ctrl-C / `docker compose stop`, **not** `touch state/STOP`,
+   which sells). Best done while the market is closed.
+2. Copy the `state/` folder (plus `config.yaml` and `.env`) to the new machine.
+3. Start the new bot. The log shows `Resumed state ... (position qty=...)`.
+
+Never run two copies against the same account: both would trade it. Without the state file
+the new bot thinks it is flat, can buy another stock, and stops managing the old position.
 
 ## Controlling a running bot
 
@@ -183,6 +270,7 @@ every poll_seconds:
 | `tradingbot/trader.py` | entry/exit logic shared by backtest and live |
 | `tradingbot/brokers/` | `PaperBroker` (simulated), `CcxtBroker` (crypto exchanges), `Trading212Broker` |
 | `tradingbot/yahoo.py` | Yahoo Finance candles, prices, market hours, FX (for stocks) |
+| `tradingbot/scanner.py` | ranks a stock universe and picks the best one to trade |
 | `tradingbot/notify.py` | Telegram alerts and `/status` / `/stop` commands |
 | `tradingbot/backtest.py` | backtester and performance metrics |
 | `tradingbot/engine.py` | live/paper loop with state persistence |

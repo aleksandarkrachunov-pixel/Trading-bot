@@ -1,10 +1,12 @@
 # Trading 212 stocks/ETFs. Copy to config.yaml.
 # Test:  python -m tradingbot t212-check --test-trade
+# Rank:  python -m tradingbot scan              (see which stock the scanner would pick)
 # Run:   python -m tradingbot live              (demo needs no --confirm-live)
 
 exchange:
   name: trading212
-  symbol: AAPL_US_EQ     # exact Trading 212 ticker (e.g. MSFT_US_EQ, VUSAl_EQ for LSE)
+  symbol: AAPL_US_EQ     # exact Trading 212 ticker (e.g. MSFT_US_EQ, VUSAl_EQ for LSE);
+                         # with the scanner on, this is only the starting stock
   timeframe: 1h          # Yahoo intervals: 1m 5m 15m 30m 1h 1d
 
 trading212:
@@ -13,6 +15,16 @@ trading212:
   extended_hours: false
   quantity_decimals: 2   # fractional share precision
   order_timeout: 60
+  adopt_positions: true  # at startup, take over held scanner stocks the bot isn't tracking (lost state).
+                         # Set false if you also hold stocks by hand in this account.
+
+scanner:
+  enabled: true          # trade the best-ranked stocks instead of only exchange.symbol
+  max_positions: 3       # hold up to 3 stocks at once, each capped at max_position_pct / 3 of equity
+  universe: []           # T212 tickers to scan; empty = ~45 large US stocks (AAPL, MSFT, NVDA, ...)
+  lookback_bars: 120     # momentum window in candles (120 x 1h ~ 4 trading weeks)
+  rescan_minutes: 60     # rescan this often while flat; holds a stock until the position closes
+  min_price: 5.0
 
 strategy:
   name: sma_crossover

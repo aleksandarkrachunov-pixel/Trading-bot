@@ -1,0 +1,19 @@
+# Always-on bot: `docker compose up -d --build`, logs: `docker compose logs -f`.
+# Starts again after a crash or a reboot of the machine (restart: unless-stopped).
+services:
+  bot:
+    build: .
+    container_name: tradingbot
+    command: ["live"]            # Trading 212 demo needs no flag; add "--confirm-live" for real money
+    restart: unless-stopped
+    stop_grace_period: 60s       # let it finish an order and save state on shutdown
+    env_file: .env
+    environment:
+      TZ: UTC
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./state:/app/state       # open position + trade history: keep this folder
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}

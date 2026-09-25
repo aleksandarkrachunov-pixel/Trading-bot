@@ -57,12 +57,16 @@ def fetch_history(exchange, symbol: str, timeframe: str, since: str, until: str 
 
 
 def drop_open_candle(df: pd.DataFrame, timeframe: str, now: pd.Timestamp | None = None) -> pd.DataFrame:
-    """Remove the last candle if it hasn't closed yet."""
+    """Remove candles that haven't closed yet.
+
+    Usually that's just the last one, but Yahoo also appends a live-quote row after the
+    forming candle (e.g. 19:30 bar + 19:33:17 tick), so check every row.
+    """
     if df.empty:
         return df
     now = now or pd.Timestamp.now(tz="UTC")
-    close_time = df.index[-1] + pd.Timedelta(seconds=timeframe_seconds(timeframe))
-    return df.iloc[:-1] if close_time > now else df
+    close_times = df.index + pd.Timedelta(seconds=timeframe_seconds(timeframe))
+    return df[close_times <= now]
 
 
 def load_csv(path: str) -> pd.DataFrame:
