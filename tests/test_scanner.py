@@ -325,3 +325,11 @@ def test_restart_remembers_a_stopped_out_stock(tmp_path):
     resumed, _ = make_engine(tmp_path, MORE, max_positions=3)
     again = next(s for s in resumed.slots if s.symbol == "RISING_US_EQ")
     assert again.trader.position.wait_for_reset  # no immediate re-buy after the restart
+
+
+def test_min_momentum_rejects_flat_low_volatility_stocks():
+    from tradingbot.scanner import ScanResult
+    flat = ScanResult("FLAT_US_EQ", 35.0, momentum=0.004, volatility=0.003, score=1.6, signal=1)
+    riser = ScanResult("UP_US_EQ", 20.0, momentum=0.08, volatility=0.04, score=2.0, signal=1)
+    assert flat.eligible(3.0) and not flat.eligible(3.0, min_momentum=0.02)
+    assert riser.eligible(3.0, min_momentum=0.02)

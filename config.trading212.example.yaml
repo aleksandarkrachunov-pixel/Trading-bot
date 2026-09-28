@@ -21,10 +21,18 @@ trading212:
 scanner:
   enabled: true          # trade the best-ranked stocks instead of only exchange.symbol
   max_positions: 3       # hold up to 3 stocks at once, each capped at max_position_pct / 3 of equity
-  universe: []           # T212 tickers to scan; empty = ~45 large US stocks (AAPL, MSFT, NVDA, ...)
-  lookback_bars: 120     # momentum window in candles (120 x 1h ~ 4 trading weeks)
-  rescan_minutes: 60     # rescan this often while flat; holds a stock until the position closes
-  min_price: 5.0
+  universe_source: small_caps  # "small_caps": liquid US small caps, no S&P 500 members
+                               # "list": the tickers in `universe` (empty = ~45 large US stocks)
+  min_market_cap: 300000000    # small caps: $300M ...
+  max_market_cap: 2000000000   # ... to $2B (also keeps every S&P 500 company out)
+  min_dollar_volume: 5000000   # at least $5M traded per day, so orders fill near the price
+  max_universe: 150            # scan the 150 most traded (a scan takes ~1-2 minutes)
+  exclude_sp500: true          # also drop anything on the current S&P 500 list
+  universe_refresh_hours: 12   # rebuild the list from Yahoo's small-cap screeners twice a day
+  lookback_bars: 35      # short-term momentum: ~1 trading week of 1h candles
+  rescan_minutes: 60     # rescan this often while a slot is free; holds a stock until the position closes
+  min_price: 3.0         # skip sub-$3 stocks (wide spreads)
+  min_momentum: 0.02     # must be up at least 2% over the lookback: growth, not a flat low-volatility stock
 
 strategy:
   name: sma_crossover

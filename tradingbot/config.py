@@ -69,9 +69,20 @@ class ScannerConfig:
     enabled: bool = False              # trade the best stock from `universe` instead of exchange.symbol
     max_positions: int = 1             # hold up to this many of the top-ranked stocks at once
     universe: list[str] = field(default_factory=list)  # tickers to scan; empty = built-in large-cap US list
+    # "list" = `universe` (or the built-in list); "small_caps" = liquid US small caps outside the
+    # S&P 500 from Yahoo's small-cap screeners, refreshed every `universe_refresh_hours`.
+    universe_source: str = "list"
+    screeners: list[str] = field(default_factory=lambda: ["aggressive_small_caps", "small_cap_gainers"])
+    min_market_cap: float = 300e6
+    max_market_cap: float = 2e9
+    min_dollar_volume: float = 5e6     # average daily traded value (price x volume)
+    max_universe: int = 150            # scan at most this many (most liquid first)
+    exclude_sp500: bool = True
+    universe_refresh_hours: float = 12
     lookback_bars: int = 120           # momentum window, in candles of exchange.timeframe
     rescan_minutes: float = 60         # how often to rescan while flat
     min_price: float = 5.0             # ignore penny stocks
+    min_momentum: float = 0.0          # minimum return over lookback_bars to be eligible (0.02 = +2%)
     request_delay: float = 0.3         # seconds between price-data requests
 
 
@@ -163,6 +174,8 @@ def validate(cfg: Config) -> None:
         raise ValueError("engine.mode must be 'paper' or 'live'")
     if cfg.trading212.environment not in ("demo", "live"):
         raise ValueError("trading212.environment must be 'demo' or 'live'")
+    if cfg.scanner.universe_source not in ("list", "small_caps"):
+        raise ValueError("scanner.universe_source must be 'list' or 'small_caps'")
     if cfg.scanner.max_positions < 1:
         raise ValueError("scanner.max_positions must be >= 1")
     if cfg.scanner.lookback_bars < 2:

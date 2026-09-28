@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import logging
 import sys
 from pathlib import Path
@@ -155,15 +156,21 @@ def cmd_run(args, cfg: Config) -> int:
         if cfg.exchange.name not in STOCK_SOURCES:
             print("The stock scanner needs exchange.name: trading212 (or yahoo for paper)", file=sys.stderr)
             return 2
-        from .scanner import DEFAULT_UNIVERSE, Scanner
-        universe = cfg.scanner.universe or DEFAULT_UNIVERSE
-        if hasattr(broker, "tradable"):
-            universe = broker.tradable(universe)
+        from .scanner import Scanner
+        provider = _universe_provider(cfg, broker)
+        try:
+            universe = provider()
+        except Exception as e:
+            print(f"Could not build the scanner universe: {e}", file=sys.stderr)
+            return 2
         if not universe:
             print("Scanner universe is empty", file=sys.stderr)
             return 2
-        scanner = Scanner(data, strategy, cfg.scanner, cfg.exchange.timeframe, cfg.engine.history_bars, universe)
-        log.info("Scanner on: picking the best of %d stocks", len(universe))
+        dynamic = provider if cfg.scanner.universe_source == "small_caps" else None
+        scanner = Scanner(data, strategy, cfg.scanner, cfg.exchange.timeframe, cfg.engine.history_bars, universe,
+                          universe_provider=dynamic)
+        scanner._universe_at = time.time()  # just built; next refresh after universe_refresh_hours
+        log.info("Scanner on (%s): picking the best of %d stocks", cfg.scanner.universe_source, len(universe))
 
     notifier = make_notifier(cfg, prefix=f"[{label}] ")
     engine = Engine(cfg, strategy, broker, data, notifier=notifier, label=label, scanner=scanner)
@@ -212,13 +219,27 @@ def cmd_t212_check(args, cfg: Config) -> int:
     return 0
 
 
+def _universe_provider(cfg: Config, broker=None):
+    """Callable returning the scanner's tickers: the configured list, or today's small caps."""
+    from .scanner import DEFAULT_UNIVERSE
+
+    def provider() -> list[str]:
+        if cfg.scanner.universe_source == "small_caps":
+            from .universe import small_caps, to_t212
+            tickers = to_t212(small_caps(cfg.scanner))
+        else:
+            tickers = cfg.scanner.universe or DEFAULT_UNIVERSE
+        return broker.tradable(tickers) if hasattr(broker, "tradable") else list(tickers)
+    return provider
+
+
 def cmd_scan(args, cfg: Config) -> int:
     """Rank the scanner universe right now (no trading)."""
-    from .scanner import DEFAULT_UNIVERSE, Scanner, format_table
+    from .scanner import Scanner, format_table
     from .strategies import create_strategy
     from .yahoo import YahooData
 
-    universe = args.symbols.split(",") if args.symbols else (cfg.scanner.universe or DEFAULT_UNIVERSE)
+    universe = args.symbols.split(",") if args.symbols else _universe_provider(cfg)()
     strategy = create_strategy(cfg.strategy.name, cfg.strategy.params)
     scanner = Scanner(YahooData(), strategy, cfg.scanner, cfg.exchange.timeframe, cfg.engine.history_bars, universe)
     print(f"Scanning {len(universe)} stocks on {cfg.exchange.timeframe} candles "
@@ -227,7 +248,7 @@ def cmd_scan(args, cfg: Config) -> int:
     if not results:
         print("No data for any ticker", file=sys.stderr)
         return 1
-    print(format_table(results, cfg.scanner.min_price, args.top))
+    print(format_table(results, cfg.scanner.min_price, args.top, cfg.scanner.min_momentum))
     best = scanner.best()
     print(f"\nBest pick: {best.symbol} (score {best.score:+.2f}, {best.momentum:+.1%})" if best
           else "\nNo stock is eligible right now (none has a buy signal with positive momentum)")

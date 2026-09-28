@@ -44,8 +44,9 @@ class ScanResult:
     score: float
     signal: int        # strategy target on the latest closed candle
 
-    def eligible(self, min_price: float) -> bool:
-        return self.signal == 1 and self.score > 0 and self.price >= min_price
+    def eligible(self, min_price: float, min_momentum: float = 0.0) -> bool:
+        return (self.signal == 1 and self.score > 0 and self.price >= min_price
+                and self.momentum >= min_momentum)
 
 
 def score_candles(df, strategy: Strategy, lookback: int) -> tuple[float, float, float, int] | None:
@@ -62,7 +63,7 @@ def score_candles(df, strategy: Strategy, lookback: int) -> tuple[float, float, 
 
 class Scanner:
     def __init__(self, data, strategy: Strategy, cfg: ScannerConfig, timeframe: str, history_bars: int,
-                 universe: list[str] | None = None, sleep=time.sleep):
+                 universe: list[str] | None = None, sleep=time.sleep, universe_provider=None):
         self.data = data  # anything with ccxt-style fetch_ohlcv (YahooData for stocks)
         self.strategy = strategy
         self.cfg = cfg
@@ -70,11 +71,31 @@ class Scanner:
         self.history_bars = max(history_bars, cfg.lookback_bars + 1)
         self.universe = list(universe if universe is not None else (cfg.universe or DEFAULT_UNIVERSE))
         self._sleep = sleep
+        # Optional callable returning a fresh universe (e.g. today's small caps); refreshed on scan.
+        self.universe_provider = universe_provider
+        self._universe_at: float | None = None
         self.results: list[ScanResult] = []
         self.last_scan: float | None = None  # time.time() of the last completed scan
 
+    def refresh_universe(self, now: float | None = None) -> None:
+        """Reload the universe from the provider when it is older than universe_refresh_hours."""
+        if self.universe_provider is None:
+            return
+        now = time.time() if now is None else now
+        if self._universe_at is not None and now - self._universe_at < self.cfg.universe_refresh_hours * 3600:
+            return
+        try:
+            universe = list(self.universe_provider())
+        except Exception as e:
+            log.warning("Scanner: could not refresh the universe (%s); keeping %d stocks", e, len(self.universe))
+            return
+        if universe:
+            self.universe, self._universe_at = universe, now
+            log.info("Scanner universe refreshed: %d stocks", len(universe))
+
     def scan(self) -> list[ScanResult]:
         """Score every ticker in the universe, best first. Tickers that fail are skipped."""
+        self.refresh_universe()
         results = []
         for i, symbol in enumerate(self.universe):
             if i:
@@ -100,7 +121,7 @@ class Scanner:
 
     def eligible(self) -> list[ScanResult]:
         """Stocks with a buy signal and positive momentum, best first."""
-        return [r for r in self.results if r.eligible(self.cfg.min_price)]
+        return [r for r in self.results if r.eligible(self.cfg.min_price, self.cfg.min_momentum)]
 
     def best(self) -> ScanResult | None:
         return next(iter(self.eligible()), None)
@@ -110,16 +131,17 @@ class Scanner:
             return "No scan yet"
         lines = [f"🔎 Top {min(top, len(self.results))} of {len(self.results)} scanned:"]
         for r in self.results[:top]:
-            mark = "✅" if r.eligible(self.cfg.min_price) else "·"
+            mark = "✅" if r.eligible(self.cfg.min_price, self.cfg.min_momentum) else "·"
             lines.append(f"{mark} {r.symbol}: score {r.score:+.2f} · {r.momentum:+.1%} · {r.price:.2f}")
         return "\n".join(lines)
 
 
-def format_table(results: list[ScanResult], min_price: float, top: int | None = None) -> str:
+def format_table(results: list[ScanResult], min_price: float, top: int | None = None,
+                 min_momentum: float = 0.0) -> str:
     rows = results[:top] if top else results
     out = [f"{'#':>3}  {'ticker':<12} {'price':>10} {'return':>8} {'vol':>7} {'score':>7}  signal"]
     for i, r in enumerate(rows, 1):
-        signal = "BUY" if r.eligible(min_price) else ("long" if r.signal else "flat")
+        signal = "BUY" if r.eligible(min_price, min_momentum) else ("long" if r.signal else "flat")
         out.append(f"{i:>3}  {r.symbol:<12} {r.price:>10.2f} {r.momentum:>+8.1%} {r.volatility:>7.1%} "
                    f"{r.score:>+7.2f}  {signal}")
     return "\n".join(out)
