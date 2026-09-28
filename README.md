@@ -148,6 +148,15 @@ doesn't stick to `exchange.symbol`. It ranks a list of stocks and trades the bes
   the drawdown limit stay in one currency. You can write `META_US_EQ`; the bot finds
   Trading 212's `FB_US_EQ`.
 
+**Small caps only** (`universe_source: small_caps`, the default in the Trading 212 example):
+instead of a fixed list, the bot scans liquid US small caps from Yahoo's small-cap screeners,
+rebuilt every `universe_refresh_hours`: $300M-$2B market cap, at least $5M traded per day,
+price >= `min_price`, and **no S&P 500 members** (checked against the current constituent list;
+the $2B ceiling keeps them out even if that list can't be loaded). For short-term moves the
+example ranks on 35 hourly candles (~1 week) and requires at least +2% (`min_momentum`).
+Small caps move more and can gap; each position still risks only `risk_per_trade`, which
+makes positions smaller when a stock is more volatile.
+
 ```bash
 python -m tradingbot scan                     # show today's ranking and the pick (no trading)
 python -m tradingbot scan --symbols NVDA_US_EQ,AMD_US_EQ,INTC_US_EQ
