@@ -14,7 +14,7 @@ trading212:
   data_symbol: ""        # Yahoo symbol for prices; auto: AAPL_US_EQ -> AAPL, VUSAl_EQ -> VUSA.L
   extended_hours: false
   quantity_decimals: 2   # fractional share precision
-  order_timeout: 60
+  order_timeout: 180      # seconds to wait for a fill; small caps can take a minute or more
   adopt_positions: true  # at startup, take over held scanner stocks the bot isn't tracking (lost state).
                          # Set false if you also hold stocks by hand in this account.
 
