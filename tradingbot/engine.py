@@ -194,6 +194,10 @@ class Engine:
                        "(sold manually?). Adjusting to what is held.")
                 log.warning(msg)
                 self.notifier.send(f"⚠️ {msg}")
+                # Equity was overstated while we counted shares we no longer had (and the sale's
+                # cash on top), so the recorded peak is bogus: measuring drawdown from it would
+                # fire the kill switch for nothing. Restart the peak from the corrected equity.
+                self.risk.state.peak_equity = 0.0
                 if held <= 0:
                     # Closed outside the bot: don't buy it straight back, and refill the slot soon.
                     slot.trader.position = type(pos)(wait_for_reset=True)

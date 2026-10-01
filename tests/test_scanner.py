@@ -348,10 +348,34 @@ def test_position_sold_outside_the_bot_frees_the_slot(tmp_path):
             return 1000.0, 0.0
     paper = slot.broker
     slot.broker = SoldByHand()
+    engine.risk.state.peak_equity = 99_999.0  # inflated while the sold shares were still counted
     engine.cfg.engine.reconcile_minutes = 0
     engine._maybe_reconcile()
     assert not slot.is_open and slot.trader.position.wait_for_reset
+    assert engine.risk.state.peak_equity == 0.0  # so the next equity update can't trip the kill switch
     assert engine.scanner.due()  # rescan right away to refill the slot
     slot.broker = paper
     engine._rescan()
     assert slot.active and slot.symbol not in (sold, None)  # refilled with another stock, not re-bought
+
+
+def test_manual_sale_does_not_trip_the_kill_switch(tmp_path):
+    engine, data = make_engine(tmp_path, MORE, max_positions=3)
+    engine.step()
+    slot = engine.open_slots[0]
+    paper = slot.broker
+    # Sold by hand: the cash arrives, but for a while the bot still counts the shares too.
+    paper.cash += slot.trader.position.qty * slot.last_price
+    engine.risk.update_equity(engine._cash() + sum(s.trader.position.qty * s.last_price
+                                                   for s in engine.open_slots), pd.Timestamp.now(tz="UTC"))
+
+    class SoldByHand:
+        symbol = slot.symbol
+
+        def balances(self):
+            return paper.cash, 0.0
+    slot.broker = SoldByHand()
+    engine.reconcile()
+    slot.broker = paper
+    engine.step()
+    assert not engine.risk.state.halted
