@@ -77,6 +77,7 @@ class Engine:
         self.last_equity: float | None = None
         self.market_open: bool | None = None
         self._last_heartbeat = time.monotonic()
+        self._last_reconcile = time.monotonic()  # run() reconciles at startup
 
         safe_symbol = "scanner" if scanner else cfg.exchange.symbol.replace("/", "-")
         self.state_dir = Path(cfg.engine.state_dir)
@@ -194,7 +195,10 @@ class Engine:
                 log.warning(msg)
                 self.notifier.send(f"⚠️ {msg}")
                 if held <= 0:
-                    slot.trader.position = type(pos)()
+                    # Closed outside the bot: don't buy it straight back, and refill the slot soon.
+                    slot.trader.position = type(pos)(wait_for_reset=True)
+                    if self.scanner:
+                        self.scanner.last_scan = None
                 else:
                     pos.qty = held
 
@@ -344,8 +348,19 @@ class Engine:
             self._last_heartbeat = time.monotonic()
             self.notifier.send(self.status_text())
 
+    def _maybe_reconcile(self) -> None:
+        """Re-check held positions every few minutes, not only at startup (manual sales)."""
+        if time.monotonic() - self._last_reconcile < self.cfg.engine.reconcile_minutes * 60:
+            return
+        self._last_reconcile = time.monotonic()
+        try:
+            self.reconcile()
+        except Exception as e:
+            log.warning("Could not reconcile positions: %s", e)
+
     def step(self) -> None:
         now = datetime.now(timezone.utc)
+        self._maybe_reconcile()
         for slot in self.slots:
             if slot.is_open or (slot.active and not self.scanner):
                 slot.last_price = slot.broker.last_price()

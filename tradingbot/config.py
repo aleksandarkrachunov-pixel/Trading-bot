@@ -48,6 +48,7 @@ class EngineConfig:
     mode: str = "paper"                # paper | live
     poll_seconds: int = 30
     history_bars: int = 300
+    reconcile_minutes: float = 5       # compare positions with the broker this often (manual trades)
     state_dir: str = "state"
     log_dir: str = "logs"
 

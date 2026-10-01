@@ -333,3 +333,25 @@ def test_min_momentum_rejects_flat_low_volatility_stocks():
     riser = ScanResult("UP_US_EQ", 20.0, momentum=0.08, volatility=0.04, score=2.0, signal=1)
     assert flat.eligible(3.0) and not flat.eligible(3.0, min_momentum=0.02)
     assert riser.eligible(3.0, min_momentum=0.02)
+
+
+def test_position_sold_outside_the_bot_frees_the_slot(tmp_path):
+    engine, _ = make_engine(tmp_path, {**MORE, "FOURTH_US_EQ": trend(0.0008, seed=6)}, max_positions=3)
+    engine.step()
+    slot = engine.open_slots[0]
+    sold = slot.symbol
+
+    class SoldByHand:  # a real broker that no longer holds the stock
+        symbol = sold
+
+        def balances(self):
+            return 1000.0, 0.0
+    paper = slot.broker
+    slot.broker = SoldByHand()
+    engine.cfg.engine.reconcile_minutes = 0
+    engine._maybe_reconcile()
+    assert not slot.is_open and slot.trader.position.wait_for_reset
+    assert engine.scanner.due()  # rescan right away to refill the slot
+    slot.broker = paper
+    engine._rescan()
+    assert slot.active and slot.symbol not in (sold, None)  # refilled with another stock, not re-bought
