@@ -38,6 +38,7 @@ class Trade:
     pnl: float           # net of fees, quote currency
     return_pct: float
     exit_reason: str
+    symbol: str = ""     # empty in trades recorded before this field existed
 
 
 @dataclass
@@ -54,8 +55,13 @@ class Trader:
         return quote + self.position.qty * price
 
     # ---- actions ------------------------------------------------------------
-    def rebalance(self, target: int, atr_value: float, price: float, now: datetime) -> Fill | None:
-        """Move towards the strategy's target position, respecting risk rules."""
+    def rebalance(self, target: int, atr_value: float, price: float, now: datetime,
+                  equity: float | None = None, max_value: float | None = None) -> Fill | None:
+        """Move towards the strategy's target position, respecting risk rules.
+
+        With several positions the engine passes the account-wide `equity` and a
+        `max_value` cap for this position (its share of the account and the free cash).
+        """
         pos = self.position
         if self.risk.state.halted:
             return self.exit(price, now, "kill_switch") if pos.is_open else None
@@ -67,13 +73,17 @@ class Trader:
         if pos.is_open or pos.wait_for_reset:
             return None
 
-        equity = self.equity(price)
+        equity = self.equity(price) if equity is None else equity
         ok, reason = self.risk.can_open(equity)
         if not ok:
             log.info("Entry blocked: %s", reason)
             self.notifier.send(f"⏸ Entry signal ignored: {reason}", key=reason[:20], throttle=6 * 3600)
             return None
         qty = self.risk.position_size(equity, price, atr_value)
+        if max_value is not None:
+            qty = min(qty, max_value / price)
+            if qty * price < self.risk.cfg.min_order_value:
+                qty = 0.0
         if qty <= 0:
             log.info("Entry skipped: position size too small")
             return None
@@ -112,7 +122,7 @@ class Trader:
         trade = Trade(
             entry_time=pos.entry_time, exit_time=str(now), entry_price=pos.entry_price,
             exit_price=fill.price, qty=fill.qty, pnl=pnl,
-            return_pct=pnl / (cost * fill.qty / pos.qty), exit_reason=reason,
+            return_pct=pnl / (cost * fill.qty / pos.qty), exit_reason=reason, symbol=self.broker.symbol,
         )
         self.trades.append(trade)
         log.info("SELL %.6f @ %.4f reason=%s pnl=%.2f (%.2f%%)",

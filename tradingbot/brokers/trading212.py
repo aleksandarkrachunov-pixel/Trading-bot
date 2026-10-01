@@ -9,8 +9,10 @@
 """
 from __future__ import annotations
 
+import copy
 import logging
 import math
+import re
 import threading
 import time
 
@@ -126,29 +128,85 @@ class Trading212Broker(Broker):
         self.quantity_decimals = quantity_decimals
         self.order_timeout = order_timeout
         self._sleep = sleep
-        self._summary: tuple[float, dict] | None = None
+        self._cache: dict = {"summary": None}  # shared with sibling brokers
 
         summary = self.account_summary()
         self.account_currency = summary.get("currency", "")
-        self.instrument = self._find_instrument(ticker)
-        self.instrument_currency = self.instrument.get("currencyCode") or data.currency(ticker) or self.account_currency
+        self.set_symbol(ticker)
+
+    def set_symbol(self, ticker: str) -> None:
+        instrument = self._find_instrument(ticker)
+        self.map_price_symbol(ticker)
+        super().set_symbol(ticker)
+        self.instrument = instrument
+        self.instrument_currency = (instrument.get("currencyCode") or self.data.currency(ticker)
+                                    or self.account_currency)
         self.quote = self.instrument_currency
         log.info("Trading 212 %s account (%s): %s [%s], instrument currency %s",
-                 client.environment.upper(), self.account_currency, ticker,
-                 self.instrument.get("name", "?"), self.instrument_currency)
+                 self.client.environment.upper(), self.account_currency, ticker,
+                 instrument.get("name", "?"), self.instrument_currency)
+
+    def sibling(self, ticker: str) -> "Trading212Broker":
+        """Another broker on the same account for a second stock (shares API client and caches)."""
+        other = copy.copy(self)
+        other.set_symbol(ticker)
+        return other
+
+    def instruments(self) -> dict[str, dict]:
+        """All tradable instruments by ticker (fetched once: the endpoint allows 1 call / 50s)."""
+        if "instruments" not in self._cache:
+            self._cache["instruments"] = {i["ticker"]: i for i in self.client.instruments() if i.get("ticker")}
+        return self._cache["instruments"]
 
     def _find_instrument(self, ticker: str) -> dict:
-        for inst in self.client.instruments():
-            if inst.get("ticker") == ticker:
-                return inst
-        raise ValueError(f"Ticker '{ticker}' not found on Trading 212. Use the exact ticker, e.g. AAPL_US_EQ")
+        inst = self.instruments().get(ticker)
+        if inst is None:
+            raise ValueError(f"Ticker '{ticker}' not found on Trading 212. Use the exact ticker, e.g. AAPL_US_EQ")
+        return inst
+
+    def tradable(self, tickers: list[str]) -> list[str]:
+        """The subset of `tickers` on Trading 212 in the current instrument's currency.
+
+        Keeping one currency means equity, the drawdown kill switch and position sizing
+        stay comparable when the scanner switches between stocks.
+        """
+        insts = self.instruments()
+        by_symbol = {i.get("shortName"): t for t, i in insts.items() if t.endswith("_US_EQ")}
+        keep, dropped = [], []
+        for t in tickers:
+            if t not in insts:  # e.g. META_US_EQ -> FB_US_EQ (T212 kept the old ticker)
+                t = by_symbol.get(t.removesuffix("_US_EQ"), t)
+            inst = insts.get(t)
+            ok = inst is not None and (inst.get("currencyCode") or self.instrument_currency) == self.instrument_currency
+            if ok and t not in keep:
+                keep.append(t)
+                self.map_price_symbol(t)
+            elif not ok:
+                dropped.append(t)
+        if dropped:
+            log.warning("Scanner: not on Trading 212 or not in %s, skipped: %s",
+                        self.instrument_currency, ", ".join(dropped))
+        return keep
+
+    def map_price_symbol(self, ticker: str) -> None:
+        """Price US stocks by their market symbol (T212 `shortName`), not the T212 ticker.
+
+        The ticker can be stale after a rename: FB_US_EQ is Meta (META), and CTRA_US_EQ
+        is Alpha Metallurgical (AMR), not Coterra.
+        """
+        symbol_map = getattr(self.data, "symbol_map", None)
+        short = (self.instruments().get(ticker) or {}).get("shortName") or ""
+        if (symbol_map is not None and ticker not in symbol_map and ticker.endswith("_US_EQ")
+                and re.fullmatch(r"[A-Z][A-Z0-9.]*", short)):
+            symbol_map[ticker] = short.replace(".", "-")
 
     # ---- balances & prices ------------------------------------------------------------
     def account_summary(self, max_age: float = 5.0) -> dict:
         """Cached account summary (the endpoint allows 1 request / 5s)."""
-        if self._summary is None or time.monotonic() - self._summary[0] > max_age:
-            self._summary = (time.monotonic(), self.client.account_summary())
-        return self._summary[1]
+        cached = self._cache["summary"]
+        if cached is None or time.monotonic() - cached[0] > max_age:
+            cached = self._cache["summary"] = (time.monotonic(), self.client.account_summary())
+        return cached[1]
 
     def _fx(self) -> float:
         """Instrument-currency units per 1 account-currency unit."""
@@ -159,6 +217,18 @@ class Trading212Broker(Broker):
             if (p.get("instrument") or {}).get("ticker", p.get("ticker")) == self.symbol:
                 return float(p.get("quantityAvailableForTrading", p.get("quantity")) or 0.0)
         return 0.0
+
+    def held_positions(self) -> list[dict]:
+        """Every position in the account: [{ticker, qty, avg_price (instrument currency), opened}]."""
+        out = []
+        for p in self.client.positions():
+            ticker = (p.get("instrument") or {}).get("ticker", p.get("ticker"))
+            qty = float(p.get("quantityAvailableForTrading", p.get("quantity")) or 0.0)
+            avg = p.get("averagePricePaid", p.get("averagePrice"))
+            if ticker and qty > 0 and avg:
+                out.append({"ticker": ticker, "qty": qty, "avg_price": float(avg),
+                            "opened": p.get("createdAt") or p.get("initialFillDate") or ""})
+        return out
 
     def balances(self) -> tuple[float, float]:
         cash = float((self.account_summary().get("cash") or {}).get("availableToTrade") or 0.0)
@@ -173,7 +243,17 @@ class Trading212Broker(Broker):
         return math.floor(qty * f + 1e-9) / f
 
     def market_buy(self, qty: float) -> Fill:
-        return self._execute(self._round_down(qty), "buy")
+        # Trading 212 holds back a buffer on market buys (price moves, FX fee), so a buy near the
+        # free cash can be rejected. A rejected order was never placed: retry a little smaller.
+        for attempt in range(4):
+            try:
+                return self._execute(self._round_down(qty), "buy")
+            except Trading212Error as e:
+                if "insufficient-free" not in str(e) or attempt == 3:
+                    raise
+                qty *= 0.95
+                log.warning("Trading 212: insufficient funds, retrying with %.4f %s", qty, self.symbol)
+        raise RuntimeError("unreachable")
 
     def market_sell(self, qty: float) -> Fill:
         qty = self._round_down(min(qty, self.position_qty()))
@@ -185,7 +265,7 @@ class Trading212Broker(Broker):
         signed = qty if side == "buy" else -qty
         before = self.position_qty()
         log.info("Trading 212 %s market %s %s x %s", self.client.environment.upper(), side.upper(), qty, self.symbol)
-        self._summary = None  # cash changes after this order
+        self._cache["summary"] = None  # cash changes after this order
         order = self.client.place_market_order(self.symbol, signed, self.extended_hours)
         order_id = order["id"]
 

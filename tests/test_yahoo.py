@@ -53,3 +53,14 @@ def test_fx_rate_handles_gbx():
 def test_unsupported_timeframe():
     with pytest.raises(ValueError):
         YahooData(session=FakeSession(None)).fetch_ohlcv("AAPL", "4h", limit=10)
+
+
+def test_drop_open_candle_removes_forming_bar_and_live_tick():
+    import pandas as pd
+
+    from tradingbot.data import drop_open_candle
+    idx = pd.to_datetime(["2026-09-24 17:30:00", "2026-09-24 18:30:00", "2026-09-24 19:30:00", "2026-09-24 19:33:17"], utc=True)
+    df = pd.DataFrame({"close": [1.0, 2.0, 3.0, 4.0]}, index=idx)
+    now = pd.Timestamp("2026-09-24 19:34", tz="UTC")
+    assert drop_open_candle(df, "1h", now).index[-1] == pd.Timestamp("2026-09-24 18:30", tz="UTC")
+    assert len(drop_open_candle(df, "1h", pd.Timestamp("2026-09-24 21:00", tz="UTC"))) == 4

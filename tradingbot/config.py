@@ -48,6 +48,7 @@ class EngineConfig:
     mode: str = "paper"                # paper | live
     poll_seconds: int = 30
     history_bars: int = 300
+    reconcile_minutes: float = 5       # compare positions with the broker this often (manual trades)
     state_dir: str = "state"
     log_dir: str = "logs"
 
@@ -59,6 +60,31 @@ class Trading212Config:
     extended_hours: bool = False
     quantity_decimals: int = 2         # fractional share precision accepted for your instrument
     order_timeout: int = 60            # seconds to wait for a fill before cancelling
+    # At startup, take over positions held in the account that the bot isn't tracking
+    # (exchange.symbol, or any scanner stock). Leave off if you also hold stocks by hand.
+    adopt_positions: bool = False
+
+
+@dataclass
+class ScannerConfig:
+    enabled: bool = False              # trade the best stock from `universe` instead of exchange.symbol
+    max_positions: int = 1             # hold up to this many of the top-ranked stocks at once
+    universe: list[str] = field(default_factory=list)  # tickers to scan; empty = built-in large-cap US list
+    # "list" = `universe` (or the built-in list); "small_caps" = liquid US small caps outside the
+    # S&P 500 from Yahoo's small-cap screeners, refreshed every `universe_refresh_hours`.
+    universe_source: str = "list"
+    screeners: list[str] = field(default_factory=lambda: ["aggressive_small_caps", "small_cap_gainers"])
+    min_market_cap: float = 300e6
+    max_market_cap: float = 2e9
+    min_dollar_volume: float = 5e6     # average daily traded value (price x volume)
+    max_universe: int = 150            # scan at most this many (most liquid first)
+    exclude_sp500: bool = True
+    universe_refresh_hours: float = 12
+    lookback_bars: int = 120           # momentum window, in candles of exchange.timeframe
+    rescan_minutes: float = 60         # how often to rescan while flat
+    min_price: float = 5.0             # ignore penny stocks
+    min_momentum: float = 0.0          # minimum return over lookback_bars to be eligible (0.02 = +2%)
+    request_delay: float = 0.3         # seconds between price-data requests
 
 
 @dataclass
@@ -77,6 +103,7 @@ class Config:
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     trading212: Trading212Config = field(default_factory=Trading212Config)
+    scanner: ScannerConfig = field(default_factory=ScannerConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
     @property
@@ -127,6 +154,7 @@ def load_config(path: str | Path | None = None) -> Config:
         backtest=_build(BacktestConfig, raw.get("backtest")),
         engine=_build(EngineConfig, raw.get("engine")),
         trading212=_build(Trading212Config, raw.get("trading212")),
+        scanner=_build(ScannerConfig, raw.get("scanner")),
         telegram=_build(TelegramConfig, raw.get("telegram")),
     )
     validate(cfg)
@@ -147,3 +175,9 @@ def validate(cfg: Config) -> None:
         raise ValueError("engine.mode must be 'paper' or 'live'")
     if cfg.trading212.environment not in ("demo", "live"):
         raise ValueError("trading212.environment must be 'demo' or 'live'")
+    if cfg.scanner.universe_source not in ("list", "small_caps"):
+        raise ValueError("scanner.universe_source must be 'list' or 'small_caps'")
+    if cfg.scanner.max_positions < 1:
+        raise ValueError("scanner.max_positions must be >= 1")
+    if cfg.scanner.lookback_bars < 2:
+        raise ValueError("scanner.lookback_bars must be >= 2")

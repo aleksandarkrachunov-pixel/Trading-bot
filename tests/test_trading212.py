@@ -177,3 +177,32 @@ def test_order_post_not_retried_on_network_error():
     with pytest.raises(Trading212Error):
         client.place_market_order(TICKER, 1)
     assert len(client.session.calls) == 1
+
+
+def test_buy_retries_smaller_on_insufficient_funds():
+    rejections = []
+
+    class Picky(FakeT212):
+        def __call__(self, method, url, params, json):
+            if url.endswith("/orders/market") and json["quantity"] > 4.8:
+                rejections.append(json["quantity"])
+                return FakeResponse(400, {"type": "/api-errors/insufficient-free-for-stocks-buy",
+                                          "detail": "Insufficient funds"})
+            return super().__call__(method, url, params, json)
+
+    broker, api, _ = make(Picky())
+    fill = broker.market_buy(5.0)
+    assert rejections == [5.0] and fill.qty == 4.75
+
+
+def test_other_order_errors_are_not_retried():
+    class Broken(FakeT212):
+        def __call__(self, method, url, params, json):
+            if url.endswith("/orders/market"):
+                return FakeResponse(400, {"type": "/api-errors/instrument-not-tradable"})
+            return super().__call__(method, url, params, json)
+
+    broker, api, session = make(Broken())
+    with pytest.raises(Trading212Error):
+        broker.market_buy(1.0)
+    assert sum(1 for c in session.calls if c[1].endswith("/orders/market")) == 1

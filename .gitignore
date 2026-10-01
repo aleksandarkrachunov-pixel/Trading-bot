@@ -7,3 +7,4 @@ state/
 logs/
 data/*.csv
 .pytest_cache/
+logs_bot.out
